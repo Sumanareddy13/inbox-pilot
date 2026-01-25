@@ -1,23 +1,24 @@
-from fastapi.middleware.cors import CORSMiddleware
-
-from datetime import datetime, timezone
+import os
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+from sqlalchemy import select, desc
+
+from db import SessionLocal
+from models import TicketModel
 
 
 # -------------------------
-# 1) Data models (the "shape" of our data)
+# Pydantic models (API request/response shapes)
 # -------------------------
 
 class TicketCreate(BaseModel):
-    # This is what the frontend will send when creating a ticket
     subject: str = Field(min_length=3, max_length=200)
 
-
-class Ticket(BaseModel):
-    # This is what the backend returns (stored ticket)
+class TicketOut(BaseModel):
     id: int
     subject: str
     status: str
@@ -25,23 +26,22 @@ class Ticket(BaseModel):
 
 
 # -------------------------
-# 2) In-memory storage (temporary "database")
+# DB dependency (one session per request)
 # -------------------------
 
-TICKETS: List[Ticket] = []
-NEXT_ID: int = 1
-
-
-def now_iso() -> str:
-    # Returns current time in a standard text format
-    return datetime.now(timezone.utc).isoformat()
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 # -------------------------
-# 3) FastAPI app + endpoints (the "doors" frontend can knock on)
+# App setup
 # -------------------------
 
-app = FastAPI(title="Inbox Pilot API", version="0.1.0")
+app = FastAPI(title="Inbox Pilot API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,73 +51,83 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
 
-@app.post("/tickets", response_model=Ticket)
-def create_ticket(payload: TicketCreate):
-    """
-    Create a new ticket.
-    Frontend sends: { "subject": "Payment failed" }
-    Backend returns the created ticket with id/status/time.
-    """
-    global NEXT_ID
+# -------------------------
+# Ticket endpoints (now backed by Postgres)
+# -------------------------
 
-    ticket = Ticket(
-        id=NEXT_ID,
-        subject=payload.subject.strip(),
-        status="open",
-        created_at=now_iso(),
-    )
-    TICKETS.append(ticket)
-    NEXT_ID += 1
-    return ticket
+@app.post("/tickets", response_model=TicketOut)
+def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
+    ticket = TicketModel(subject=payload.subject.strip(), status="open")
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)  # pulls generated id + timestamps from DB
+    return {
+        "id": ticket.id,
+        "subject": ticket.subject,
+        "status": ticket.status,
+        "created_at": ticket.created_at.isoformat(),
+    }
 
 
-@app.get("/tickets", response_model=List[Ticket])
-def list_tickets(status: Optional[str] = None):
-    """
-    List all tickets.
-    Optional filter: /tickets?status=open
-    """
-    if status is None:
-        return TICKETS
-    return [t for t in TICKETS if t.status == status]
+@app.get("/tickets", response_model=List[TicketOut])
+def list_tickets(
+    status: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
+    stmt = select(TicketModel).order_by(desc(TicketModel.created_at)).limit(limit)
+    if status:
+        stmt = stmt.where(TicketModel.status == status)
+
+    rows = db.execute(stmt).scalars().all()
+    return [
+        {
+            "id": t.id,
+            "subject": t.subject,
+            "status": t.status,
+            "created_at": t.created_at.isoformat(),
+        }
+        for t in rows
+    ]
 
 
-@app.get("/tickets/{ticket_id}", response_model=Ticket)
-def get_ticket(ticket_id: int):
-    """
-    Get one ticket by ID.
-    """
-    for t in TICKETS:
-        if t.id == ticket_id:
-            return t
-    raise HTTPException(status_code=404, detail="Ticket not found")
+@app.get("/tickets/{ticket_id}", response_model=TicketOut)
+def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
+    t = db.get(TicketModel, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {
+        "id": t.id,
+        "subject": t.subject,
+        "status": t.status,
+        "created_at": t.created_at.isoformat(),
+    }
 
 
-@app.patch("/tickets/{ticket_id}", response_model=Ticket)
-def update_ticket_status(ticket_id: int, status: str):
-    """
-    Update ticket status (simple version for now).
-    Example: PATCH /tickets/1?status=closed
-    """
+@app.patch("/tickets/{ticket_id}", response_model=TicketOut)
+def update_ticket_status(ticket_id: int, status: str, db: Session = Depends(get_db)):
     allowed = {"open", "closed"}
     if status not in allowed:
         raise HTTPException(status_code=400, detail="Invalid status. Use open or closed.")
 
-    for idx, t in enumerate(TICKETS):
-        if t.id == ticket_id:
-            updated = Ticket(
-                id=t.id,
-                subject=t.subject,
-                status=status,
-                created_at=t.created_at,
-            )
-            TICKETS[idx] = updated
-            return updated
+    t = db.get(TicketModel, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
 
-    raise HTTPException(status_code=404, detail="Ticket not found")
+    t.status = status
+    db.commit()
+    db.refresh(t)
+    return {
+        "id": t.id,
+        "subject": t.subject,
+        "status": t.status,
+        "created_at": t.created_at.isoformat(),
+    }

@@ -1,5 +1,9 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 from typing import List, Optional
+
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,9 +15,8 @@ from db import SessionLocal
 from models import TicketModel
 
 
-# -------------------------
 # Pydantic models (API request/response shapes)
-# -------------------------
+
 
 class TicketCreate(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
@@ -24,10 +27,8 @@ class TicketOut(BaseModel):
     status: str
     created_at: str
 
-
-# -------------------------
 # DB dependency (one session per request)
-# -------------------------
+
 
 def get_db():
     db = SessionLocal()
@@ -37,9 +38,8 @@ def get_db():
         db.close()
 
 
-# -------------------------
 # App setup
-# -------------------------
+
 
 app = FastAPI(title="Inbox Pilot API", version="0.2.0")
 
@@ -56,16 +56,16 @@ def healthz():
     return {"status": "ok"}
 
 
-# -------------------------
+
 # Ticket endpoints (now backed by Postgres)
-# -------------------------
+
 
 @app.post("/tickets", response_model=TicketOut)
 def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
     ticket = TicketModel(subject=payload.subject.strip(), status="open")
     db.add(ticket)
     db.commit()
-    db.refresh(ticket)  # pulls generated id + timestamps from DB
+    db.refresh(ticket) 
     return {
         "id": ticket.id,
         "subject": ticket.subject,

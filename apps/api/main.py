@@ -14,6 +14,7 @@ from sqlalchemy import select, desc
 from db import SessionLocal
 from models import TicketModel
 
+from models import MessageModel 
 
 # Pydantic models (API request/response shapes)
 
@@ -26,6 +27,18 @@ class TicketOut(BaseModel):
     subject: str
     status: str
     created_at: str
+
+class MessageCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=5000)
+    sender_type: str = Field(default="customer")
+
+class MessageOut(BaseModel):
+    id: int
+    ticket_id: int
+    sender_type: str
+    body: str
+    created_at: str
+
 
 # DB dependency (one session per request)
 
@@ -131,3 +144,55 @@ def update_ticket_status(ticket_id: int, status: str, db: Session = Depends(get_
         "status": t.status,
         "created_at": t.created_at.isoformat(),
     }
+
+
+@app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
+def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(get_db)):
+    # ensure ticket exists
+    t = db.get(TicketModel, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if payload.sender_type not in {"customer", "agent", "system"}:
+        raise HTTPException(status_code=400, detail="sender_type must be customer, agent, or system")
+
+    m = MessageModel(
+        ticket_id=ticket_id,
+        sender_type=payload.sender_type,
+        body=payload.body.strip(),
+    )
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return {
+        "id": m.id,
+        "ticket_id": m.ticket_id,
+        "sender_type": m.sender_type,
+        "body": m.body,
+        "created_at": m.created_at.isoformat(),
+    }
+
+
+@app.get("/tickets/{ticket_id}/messages", response_model=List[MessageOut])
+def list_messages(ticket_id: int, db: Session = Depends(get_db)):
+    # ensure ticket exists
+    t = db.get(TicketModel, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    stmt = (
+        select(MessageModel)
+        .where(MessageModel.ticket_id == ticket_id)
+        .order_by(MessageModel.created_at.asc())
+    )
+    rows = db.execute(stmt).scalars().all()
+    return [
+        {
+            "id": m.id,
+            "ticket_id": m.ticket_id,
+            "sender_type": m.sender_type,
+            "body": m.body,
+            "created_at": m.created_at.isoformat(),
+        }
+        for m in rows
+    ]

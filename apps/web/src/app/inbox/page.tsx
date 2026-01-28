@@ -7,7 +7,7 @@ type Ticket = {
 
 async function fetchTickets(): Promise<Ticket[]> {
   const res = await fetch("http://localhost:8000/tickets", {
-    cache: "no-store", // always fetch fresh during development
+    cache: "no-store",
   });
 
   if (!res.ok) {
@@ -23,22 +23,27 @@ export default async function InboxPage() {
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
       <h1 style={{ fontSize: 28, marginBottom: 8 }}>Inbox</h1>
-      <p style={{ marginBottom: 16 }}>
+
+      <p style={{ marginBottom: 16, opacity: 0.8 }}>
         Tickets loaded from FastAPI: <b>{tickets.length}</b>
       </p>
 
-      <ul style={{ paddingLeft: 18 }}>
-        {tickets.map((t) => (
-          <li key={t.id} style={{ marginBottom: 10 }}>
-            <div>
-              <b>#{t.id}</b> — {t.subject}
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              status: {t.status} • created: {t.created_at}
-            </div>
-          </li>
-        ))}
-      </ul>
+      {tickets.length === 0 ? (
+        <p>No tickets yet. Create one in the API docs.</p>
+      ) : (
+        <ul style={{ paddingLeft: 18 }}>
+          {tickets.map((t) => (
+            <li key={t.id} style={{ marginBottom: 10 }}>
+              <a href={`/inbox/${t.id}`}>
+                <b>#{t.id}</b> — {t.subject}
+              </a>
+              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                status: {t.status} • created: {t.created_at}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </main>
   );
 }

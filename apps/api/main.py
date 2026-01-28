@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import os
+from models import TicketModel, MessageModel
 from typing import List, Optional
 
 

@@ -12,6 +12,12 @@ class TicketModel(Base):
     status = Column(String, nullable=False, default="open")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+    priority = Column(String, nullable=False, default="medium")
+    category = Column(String, nullable=False, default="other")
+    assignee = Column(String, nullable=True)
+    due_at = Column(DateTime(timezone=True), nullable=True)
+
+
     # A ticket has many messages
     messages = relationship(
         "MessageModel",

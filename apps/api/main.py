@@ -14,18 +14,11 @@ from db import SessionLocal
 from models import TicketModel, MessageModel
 
 
-# -------------------------
-# Guardrails (allowed values)
-# -------------------------
 ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
 
-
-# -------------------------
-# Pydantic models (API request/response shapes)
-# -------------------------
 
 class TicketCreate(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
@@ -65,10 +58,6 @@ class MessageOut(BaseModel):
     created_at: str
 
 
-# -------------------------
-# DB dependency (one session per request)
-# -------------------------
-
 def get_db():
     db = SessionLocal()
     try:
@@ -77,15 +66,11 @@ def get_db():
         db.close()
 
 
-# -------------------------
-# App setup
-# -------------------------
-
 app = FastAPI(title="Inbox Pilot API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,10 +81,6 @@ app.add_middleware(
 def healthz():
     return {"status": "ok"}
 
-
-# -------------------------
-# Helper: serialize TicketModel -> dict
-# -------------------------
 
 def ticket_to_out(t: TicketModel) -> dict:
     return {
@@ -113,10 +94,6 @@ def ticket_to_out(t: TicketModel) -> dict:
         "created_at": t.created_at.isoformat(),
     }
 
-
-# -------------------------
-# Ticket endpoints
-# -------------------------
 
 @app.post("/tickets", response_model=TicketOut)
 def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
@@ -194,12 +171,10 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
         t.category = payload.category
 
     if payload.assignee is not None:
-        # empty string clears
         cleaned = payload.assignee.strip()
         t.assignee = cleaned if cleaned else None
 
     if payload.due_at is not None:
-        # "" clears; otherwise parse ISO time
         if payload.due_at.strip() == "":
             t.due_at = None
         else:
@@ -215,10 +190,6 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
     db.refresh(t)
     return ticket_to_out(t)
 
-
-# -------------------------
-# Message endpoints
-# -------------------------
 
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
 def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(get_db)):

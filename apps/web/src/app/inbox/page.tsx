@@ -9,28 +9,25 @@ type Ticket = {
   created_at: string;
 };
 
+const API_BASE = "http://127.0.0.1:8000";
+
 async function fetchTickets(
-  searchParams: Record<string, string | undefined>
+  sp: Record<string, string | undefined>
 ): Promise<Ticket[]> {
   const qs = new URLSearchParams();
 
-  if (searchParams.status) qs.set("status", searchParams.status);
-  if (searchParams.priority) qs.set("priority", searchParams.priority);
-  if (searchParams.category) qs.set("category", searchParams.category);
-  if (searchParams.assignee) qs.set("assignee", searchParams.assignee);
+  if (sp.status) qs.set("status", sp.status);
+  if (sp.priority) qs.set("priority", sp.priority);
+  if (sp.category) qs.set("category", sp.category);
+  if (sp.assignee) qs.set("assignee", sp.assignee);
 
   const url =
     qs.toString().length > 0
-      ? `http://localhost:8000/tickets?${qs.toString()}`
-      : "http://localhost:8000/tickets";
+      ? `${API_BASE}/tickets?${qs.toString()}`
+      : `${API_BASE}/tickets`;
 
-  const res = await fetch(url, {
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    throw new Error("Failed to fetch tickets");
-  }
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to fetch tickets");
 
   return res.json();
 }
@@ -38,9 +35,12 @@ async function fetchTickets(
 export default async function InboxPage({
   searchParams,
 }: {
-  searchParams: Record<string, string | undefined>;
+  searchParams: Promise<Record<string, string | undefined>>;
 }) {
-  const tickets = await fetchTickets(searchParams);
+  // ✅ Next 16: unwrap searchParams ONCE
+  const sp = await searchParams;
+
+  const tickets = await fetchTickets(sp);
 
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>

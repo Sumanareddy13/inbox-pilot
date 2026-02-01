@@ -17,8 +17,6 @@ class TicketModel(Base):
     assignee = Column(String, nullable=True)
     due_at = Column(DateTime(timezone=True), nullable=True)
 
-
-    # A ticket has many messages
     messages = relationship(
         "MessageModel",
         back_populates="ticket",

@@ -17,8 +17,17 @@ class TicketModel(Base):
     assignee = Column(String, nullable=True)
     due_at = Column(DateTime(timezone=True), nullable=True)
 
+    # A ticket has many messages
     messages = relationship(
         "MessageModel",
+        back_populates="ticket",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # A ticket has many audit logs
+    audit_logs = relationship(
+        "AuditLogModel",
         back_populates="ticket",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -41,3 +50,22 @@ class MessageModel(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     ticket = relationship("TicketModel", back_populates="messages")
+
+
+class AuditLogModel(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    ticket_id = Column(
+        BigInteger,
+        ForeignKey("tickets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    actor = Column(String, nullable=False)     # e.g. "agent:Sam"
+    action = Column(String, nullable=False)    # e.g. "ticket.created"
+    meta_json = Column(Text, nullable=True)    # JSON string (keep it simple)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    ticket = relationship("TicketModel", back_populates="audit_logs")

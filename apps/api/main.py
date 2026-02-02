@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import json
 from datetime import datetime
 from typing import List, Optional
 
@@ -11,14 +12,21 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
 
 from db import SessionLocal
-from models import TicketModel, MessageModel
+from models import TicketModel, MessageModel, AuditLogModel
 
 
+# -------------------------
+# Guardrails (allowed values)
+# -------------------------
 ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
 
+
+# -------------------------
+# Pydantic models
+# -------------------------
 
 class TicketCreate(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
@@ -58,6 +66,19 @@ class MessageOut(BaseModel):
     created_at: str
 
 
+class AuditLogOut(BaseModel):
+    id: int
+    ticket_id: int
+    actor: str
+    action: str
+    meta_json: Optional[str]
+    created_at: str
+
+
+# -------------------------
+# DB dependency
+# -------------------------
+
 def get_db():
     db = SessionLocal()
     try:
@@ -66,11 +87,15 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="0.3.0")
+# -------------------------
+# App setup
+# -------------------------
+
+app = FastAPI(title="Inbox Pilot API", version="0.4.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,6 +106,10 @@ app.add_middleware(
 def healthz():
     return {"status": "ok"}
 
+
+# -------------------------
+# Helpers
+# -------------------------
 
 def ticket_to_out(t: TicketModel) -> dict:
     return {
@@ -94,6 +123,28 @@ def ticket_to_out(t: TicketModel) -> dict:
         "created_at": t.created_at.isoformat(),
     }
 
+
+def actor_for_ticket(t: TicketModel) -> str:
+    # Your chosen rule:
+    # always log actor as agent:<assignee> based on current assignee
+    return f"agent:{t.assignee}" if t.assignee else "agent:unassigned"
+
+
+def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
+    meta_json = json.dumps(meta) if meta is not None else None
+    row = AuditLogModel(
+        ticket_id=ticket_id,
+        actor=actor,
+        action=action,
+        meta_json=meta_json,
+    )
+    db.add(row)
+    # do NOT commit here; caller commits as part of request
+
+
+# -------------------------
+# Ticket endpoints
+# -------------------------
 
 @app.post("/tickets", response_model=TicketOut)
 def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
@@ -111,6 +162,17 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
+
+    # audit: ticket created
+    log_event(
+        db=db,
+        ticket_id=ticket.id,
+        actor=actor_for_ticket(ticket),
+        action="ticket.created",
+        meta={"subject": ticket.subject, "priority": ticket.priority, "category": ticket.category},
+    )
+    db.commit()
+
     return ticket_to_out(ticket)
 
 
@@ -155,41 +217,84 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    before = {
+        "status": t.status,
+        "priority": t.priority,
+        "category": t.category,
+        "assignee": t.assignee,
+        "due_at": t.due_at.isoformat() if t.due_at else None,
+    }
+
+    changed_fields: dict = {}
+
     if payload.status is not None:
         if payload.status not in ALLOWED_STATUS:
             raise HTTPException(status_code=400, detail="Invalid status. Use open or closed.")
-        t.status = payload.status
+        if payload.status != t.status:
+            changed_fields["status"] = {"from": t.status, "to": payload.status}
+            t.status = payload.status
 
     if payload.priority is not None:
         if payload.priority not in ALLOWED_PRIORITY:
             raise HTTPException(status_code=400, detail="Invalid priority. Use low, medium, or high.")
-        t.priority = payload.priority
+        if payload.priority != t.priority:
+            changed_fields["priority"] = {"from": t.priority, "to": payload.priority}
+            t.priority = payload.priority
 
     if payload.category is not None:
         if payload.category not in ALLOWED_CATEGORY:
             raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
-        t.category = payload.category
+        if payload.category != t.category:
+            changed_fields["category"] = {"from": t.category, "to": payload.category}
+            t.category = payload.category
 
     if payload.assignee is not None:
         cleaned = payload.assignee.strip()
-        t.assignee = cleaned if cleaned else None
+        new_assignee = cleaned if cleaned else None
+        if new_assignee != t.assignee:
+            changed_fields["assignee"] = {"from": t.assignee, "to": new_assignee}
+            t.assignee = new_assignee
 
     if payload.due_at is not None:
         if payload.due_at.strip() == "":
-            t.due_at = None
+            new_due = None
         else:
             try:
-                t.due_at = datetime.fromisoformat(payload.due_at.replace("Z", "+00:00"))
+                new_due = datetime.fromisoformat(payload.due_at.replace("Z", "+00:00"))
             except Exception:
                 raise HTTPException(
                     status_code=400,
                     detail="due_at must be ISO format like 2026-01-20T10:00:00+00:00 (or empty string to clear)",
                 )
+        old_due = t.due_at.isoformat() if t.due_at else None
+        new_due_str = new_due.isoformat() if new_due else None
+        if new_due_str != old_due:
+            changed_fields["due_at"] = {"from": old_due, "to": new_due_str}
+            t.due_at = new_due
+
+    # If nothing changed, return as-is (don’t spam logs)
+    if not changed_fields:
+        return ticket_to_out(t)
 
     db.commit()
     db.refresh(t)
+
+    # audit: ticket updated
+    log_event(
+        db=db,
+        ticket_id=t.id,
+        actor=actor_for_ticket(t),
+        action="ticket.updated",
+        meta={"changed": changed_fields, "before": before},
+    )
+    db.commit()
+
     return ticket_to_out(t)
 
+
+# -------------------------
+# Message endpoints
+# -------------------------
 
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
 def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(get_db)):
@@ -208,6 +313,16 @@ def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(ge
     db.add(m)
     db.commit()
     db.refresh(m)
+
+    # audit: message added
+    log_event(
+        db=db,
+        ticket_id=t.id,
+        actor=actor_for_ticket(t),
+        action="message.added",
+        meta={"sender_type": m.sender_type, "body_preview": (m.body[:80] if m.body else "")},
+    )
+    db.commit()
 
     return {
         "id": m.id,
@@ -240,4 +355,38 @@ def list_messages(ticket_id: int, db: Session = Depends(get_db)):
             "created_at": m.created_at.isoformat(),
         }
         for m in rows
+    ]
+
+
+# -------------------------
+# Audit endpoints
+# -------------------------
+
+@app.get("/tickets/{ticket_id}/audit", response_model=List[AuditLogOut])
+def list_audit_logs(ticket_id: int, limit: int = 100, db: Session = Depends(get_db)):
+    t = db.get(TicketModel, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+    stmt = (
+        select(AuditLogModel)
+        .where(AuditLogModel.ticket_id == ticket_id)
+        .order_by(AuditLogModel.created_at.desc())
+        .limit(limit)
+    )
+    rows = db.execute(stmt).scalars().all()
+
+    return [
+        {
+            "id": a.id,
+            "ticket_id": a.ticket_id,
+            "actor": a.actor,
+            "action": a.action,
+            "meta_json": a.meta_json,
+            "created_at": a.created_at.isoformat(),
+        }
+        for a in rows
     ]

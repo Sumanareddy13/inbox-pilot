@@ -1,11 +1,16 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
 import json
-from datetime import datetime
-from typing import List, Optional
+import time
+import requests
+import jwt
 
-from fastapi import FastAPI, HTTPException, Depends
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -15,18 +20,129 @@ from db import SessionLocal
 from models import TicketModel, MessageModel, AuditLogModel
 
 
-# -------------------------
-# Guardrails (allowed values)
-# -------------------------
 ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
 
 
-# -------------------------
-# Pydantic models
-# -------------------------
+
+
+SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "").strip()
+if not SUPABASE_PROJECT_URL:
+    # Fail fast so you don't get silent auth bugs later
+    raise RuntimeError("Missing SUPABASE_PROJECT_URL in apps/api/.env")
+
+JWKS_URL = f"{SUPABASE_PROJECT_URL}/auth/v1/.well-known/jwks.json"
+
+_JWKS_CACHE: Dict[str, Any] = {"keys": None, "fetched_at": 0}
+_JWKS_TTL_SECONDS = 60 * 10  # 10 minutes
+
+
+def _get_jwks() -> Dict[str, Any]:
+    now = int(time.time())
+    if _JWKS_CACHE["keys"] and (now - _JWKS_CACHE["fetched_at"] < _JWKS_TTL_SECONDS):
+        return _JWKS_CACHE["keys"]
+
+    r = requests.get(JWKS_URL, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    _JWKS_CACHE["keys"] = data
+    _JWKS_CACHE["fetched_at"] = now
+    return data
+
+
+def _verify_supabase_jwt(token: str) -> dict:
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid auth token header")
+
+    kid = header.get("kid")
+    if not kid:
+        raise HTTPException(status_code=401, detail="Invalid auth token (missing kid)")
+
+    jwks = _get_jwks()
+    key = None
+    for k in jwks.get("keys", []):
+        if k.get("kid") == kid:
+            key = k
+            break
+
+    if not key:
+        # JWKS may have rotated; force refresh once
+        _JWKS_CACHE["keys"] = None
+        jwks = _get_jwks()
+        for k in jwks.get("keys", []):
+            if k.get("kid") == kid:
+                key = k
+                break
+
+    if not key:
+        raise HTTPException(status_code=401, detail="Auth key not found (kid mismatch)")
+
+    try:
+        alg = header.get("alg")
+
+        if alg == "ES256":
+            public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(key))
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["ES256"],
+                issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
+                options={"verify_aud": False},
+            )
+        elif alg == "RS256":
+            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key))
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["RS256"],
+                issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
+                options={"verify_aud": False},
+            )
+        else:
+            raise HTTPException(status_code=401, detail=f"Unsupported JWT alg: {alg}")
+
+        return payload
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Auth token expired")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("JWT VERIFY ERROR >>>", repr(e))
+        raise HTTPException(status_code=401, detail=f"Invalid auth token: {str(e)}")
+
+
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail=f"Bad Authorization format: {authorization[:30]}")
+
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token after Bearer")
+
+    return _verify_supabase_jwt(token)
+
+
+
+def actor_from_user(user: dict) -> str:
+    email = user.get("email")
+    if email:
+        return f"agent:{email}"
+    sub = user.get("sub") or "unknown"
+    return f"agent:{sub}"
+
+
+
 
 class TicketCreate(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
@@ -75,9 +191,6 @@ class AuditLogOut(BaseModel):
     created_at: str
 
 
-# -------------------------
-# DB dependency
-# -------------------------
 
 def get_db():
     db = SessionLocal()
@@ -87,11 +200,7 @@ def get_db():
         db.close()
 
 
-# -------------------------
-# App setup
-# -------------------------
-
-app = FastAPI(title="Inbox Pilot API", version="0.4.0")
+app = FastAPI(title="Inbox Pilot API", version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -107,10 +216,6 @@ def healthz():
     return {"status": "ok"}
 
 
-# -------------------------
-# Helpers
-# -------------------------
-
 def ticket_to_out(t: TicketModel) -> dict:
     return {
         "id": t.id,
@@ -124,12 +229,6 @@ def ticket_to_out(t: TicketModel) -> dict:
     }
 
 
-def actor_for_ticket(t: TicketModel) -> str:
-    # Your chosen rule:
-    # always log actor as agent:<assignee> based on current assignee
-    return f"agent:{t.assignee}" if t.assignee else "agent:unassigned"
-
-
 def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
     meta_json = json.dumps(meta) if meta is not None else None
     row = AuditLogModel(
@@ -139,15 +238,14 @@ def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Option
         meta_json=meta_json,
     )
     db.add(row)
-    # do NOT commit here; caller commits as part of request
 
-
-# -------------------------
-# Ticket endpoints
-# -------------------------
 
 @app.post("/tickets", response_model=TicketOut)
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
+def create_ticket(
+    payload: TicketCreate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
     if payload.priority not in ALLOWED_PRIORITY:
         raise HTTPException(status_code=400, detail="Invalid priority. Use low, medium, or high.")
     if payload.category not in ALLOWED_CATEGORY:
@@ -163,11 +261,10 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(ticket)
 
-    # audit: ticket created
     log_event(
         db=db,
         ticket_id=ticket.id,
-        actor=actor_for_ticket(ticket),
+        actor=actor_from_user(user),
         action="ticket.created",
         meta={"subject": ticket.subject, "priority": ticket.priority, "category": ticket.category},
     )
@@ -184,7 +281,10 @@ def list_tickets(
     assignee: Optional[str] = None,
     limit: int = 50,
     db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
 ):
+    _ = user 
+
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
 
@@ -204,7 +304,12 @@ def list_tickets(
 
 
 @app.get("/tickets/{ticket_id}", response_model=TicketOut)
-def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
+def get_ticket(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _ = user
     t = db.get(TicketModel, ticket_id)
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -212,7 +317,12 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
 
 
 @app.patch("/tickets/{ticket_id}", response_model=TicketOut)
-def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(get_db)):
+def update_ticket(
+    ticket_id: int,
+    payload: TicketUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
     t = db.get(TicketModel, ticket_id)
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -272,18 +382,16 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
             changed_fields["due_at"] = {"from": old_due, "to": new_due_str}
             t.due_at = new_due
 
-    # If nothing changed, return as-is (don’t spam logs)
     if not changed_fields:
         return ticket_to_out(t)
 
     db.commit()
     db.refresh(t)
 
-    # audit: ticket updated
     log_event(
         db=db,
         ticket_id=t.id,
-        actor=actor_for_ticket(t),
+        actor=actor_from_user(user),
         action="ticket.updated",
         meta={"changed": changed_fields, "before": before},
     )
@@ -292,12 +400,14 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
     return ticket_to_out(t)
 
 
-# -------------------------
-# Message endpoints
-# -------------------------
 
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
-def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(get_db)):
+def add_message(
+    ticket_id: int,
+    payload: MessageCreate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
     t = db.get(TicketModel, ticket_id)
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -314,11 +424,10 @@ def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(ge
     db.commit()
     db.refresh(m)
 
-    # audit: message added
     log_event(
         db=db,
         ticket_id=t.id,
-        actor=actor_for_ticket(t),
+        actor=actor_from_user(user),
         action="message.added",
         meta={"sender_type": m.sender_type, "body_preview": (m.body[:80] if m.body else "")},
     )
@@ -334,7 +443,13 @@ def add_message(ticket_id: int, payload: MessageCreate, db: Session = Depends(ge
 
 
 @app.get("/tickets/{ticket_id}/messages", response_model=List[MessageOut])
-def list_messages(ticket_id: int, db: Session = Depends(get_db)):
+def list_messages(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _ = user
+
     t = db.get(TicketModel, ticket_id)
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -358,12 +473,16 @@ def list_messages(ticket_id: int, db: Session = Depends(get_db)):
     ]
 
 
-# -------------------------
-# Audit endpoints
-# -------------------------
 
 @app.get("/tickets/{ticket_id}/audit", response_model=List[AuditLogOut])
-def list_audit_logs(ticket_id: int, limit: int = 100, db: Session = Depends(get_db)):
+def list_audit_logs(
+    ticket_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _ = user
+
     t = db.get(TicketModel, ticket_id)
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")

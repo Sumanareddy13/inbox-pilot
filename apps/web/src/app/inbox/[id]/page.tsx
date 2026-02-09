@@ -1,3 +1,10 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabaseClient";
+
+
 type Ticket = {
   id: number;
   subject: string;
@@ -26,34 +33,7 @@ type AuditLog = {
   created_at: string;
 };
 
-const API_BASE = "http://127.0.0.1:8000";
-
-async function fetchTicket(id: string): Promise<Ticket> {
-  const res = await fetch(`${API_BASE}/tickets/${id}`, { cache: "no-store" });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to fetch ticket: ${res.status} ${text}`);
-  }
-  return res.json();
-}
-
-async function fetchMessages(id: string): Promise<Message[]> {
-  const res = await fetch(`${API_BASE}/tickets/${id}/messages`, { cache: "no-store" });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to fetch messages: ${res.status} ${text}`);
-  }
-  return res.json();
-}
-
-async function fetchAudit(id: string): Promise<AuditLog[]> {
-  const res = await fetch(`${API_BASE}/tickets/${id}/audit`, { cache: "no-store" });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to fetch audit logs: ${res.status} ${text}`);
-  }
-  return res.json();
-}
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
 function getAssignees(): string[] {
   const raw = process.env.NEXT_PUBLIC_ASSIGNEES || "Sumana";
@@ -63,46 +43,124 @@ function getAssignees(): string[] {
     .filter(Boolean);
 }
 
-// --- Server Actions ---
-async function assignTicket(ticketId: string, assignee: string) {
-  "use server";
-  const res = await fetch(`${API_BASE}/tickets/${ticketId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ assignee }),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to assign ticket: ${res.status} ${text}`);
+export default function TicketPage() {
+  const router = useRouter();
+  const params = useParams<{ id: string }>();
+  const ticketId = params?.id;
+
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+
+  const [ticket, setTicket] = useState<Ticket | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [audit, setAudit] = useState<AuditLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  const assignees = useMemo(() => getAssignees(), []);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token || null;
+
+      setAccessToken(token);
+      setSessionChecked(true);
+
+      if (!token) router.push("/login");
+    })();
+  }, [router]);
+
+  async function load() {
+    if (!ticketId) return;
+    if (!accessToken) return;
+
+    try {
+      setLoading(true);
+      setErr(null);
+
+      const [tRes, mRes, aRes] = await Promise.all([
+        fetch(`${API_BASE}/tickets/${ticketId}`, {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+        fetch(`${API_BASE}/tickets/${ticketId}/messages`, {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+        fetch(`${API_BASE}/tickets/${ticketId}/audit`, {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ]);
+
+      if (!tRes.ok) throw new Error(`Ticket fetch failed: ${tRes.status} ${await tRes.text()}`);
+      if (!mRes.ok) throw new Error(`Messages fetch failed: ${mRes.status} ${await mRes.text()}`);
+      if (!aRes.ok) throw new Error(`Audit fetch failed: ${aRes.status} ${await aRes.text()}`);
+
+      setTicket(await tRes.json());
+      setMessages(await mRes.json());
+      setAudit(await aRes.json());
+    } catch (e: any) {
+      setErr(e.message || "Failed to load ticket");
+    } finally {
+      setLoading(false);
+    }
   }
-}
 
-async function closeTicket(ticketId: string) {
-  "use server";
-  const res = await fetch(`${API_BASE}/tickets/${ticketId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status: "closed" }),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to close ticket: ${res.status} ${text}`);
+  useEffect(() => {
+    if (!sessionChecked) return;
+    if (!accessToken) return;
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionChecked, accessToken, ticketId]);
+
+  async function updateTicket(patch: any) {
+    if (!accessToken) return;
+    const res = await fetch(`${API_BASE}/tickets/${ticketId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(patch),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Update failed: ${res.status} ${await res.text()}`);
+    }
   }
-}
 
-export default async function TicketPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const p = await params;
+  async function assign(assignee: string) {
+    await updateTicket({ assignee });
+    await load();
+  }
 
-  const ticket = await fetchTicket(p.id);
-  const messages = await fetchMessages(p.id);
-  const audit = await fetchAudit(p.id);
-  const assignees = getAssignees();
+  async function close() {
+    await updateTicket({ status: "closed" });
+    await load();
+  }
+
+  if (!sessionChecked) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
+  }
+
+  if (!accessToken) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
+  }
+
+  if (loading) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading…</main>;
+  }
+
+  if (err || !ticket) {
+    return (
+      <main style={{ padding: 24, fontFamily: "system-ui" }}>
+        <a href="/inbox">← Back to Inbox</a>
+        <p style={{ color: "tomato", marginTop: 10 }}>Error: {err || "Ticket not found"}</p>
+      </main>
+    );
+  }
 
   return (
     <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 900 }}>
@@ -134,24 +192,15 @@ export default async function TicketPage({
       >
         <h2 style={{ fontSize: 16, marginBottom: 10 }}>Actions</h2>
 
-        {/* Assign */}
-        <form
-          action={async (formData) => {
-            "use server";
-            const assignee = String(formData.get("assignee") || "").trim();
-            if (!assignee) return;
-            await assignTicket(p.id, assignee);
-          }}
-          style={{ display: "flex", gap: 10, alignItems: "center" }}
-        >
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <label htmlFor="assignee">
             <b>Assign:</b>
           </label>
 
           <select
             id="assignee"
-            name="assignee"
-            defaultValue={ticket.assignee ?? assignees[0] ?? "Sumana"}
+            defaultValue={ticket.assignee ?? assignees[0] ?? ""}
+            onChange={(e) => assign(e.target.value)}
             style={{ padding: 8 }}
           >
             {assignees.map((name) => (
@@ -161,41 +210,20 @@ export default async function TicketPage({
             ))}
           </select>
 
-          <button type="submit" style={{ padding: "8px 12px" }}>
-            Assign
-          </button>
-        </form>
-
-        {/* Close */}
-        <form
-          action={async () => {
-            "use server";
-            await closeTicket(p.id);
-          }}
-          style={{ marginTop: 12 }}
-        >
           <button
-            type="submit"
+            onClick={() => close()}
             disabled={ticket.status === "closed"}
             style={{ padding: "8px 12px" }}
           >
             {ticket.status === "closed" ? "Already Closed" : "Close Ticket"}
           </button>
-        </form>
+        </div>
       </section>
 
-      {/* Layout: Messages + Activity */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 22 }}>
         {/* Messages */}
-        <section
-          style={{
-            padding: 12,
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: 10,
-          }}
-        >
+        <section style={{ padding: 12, border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10 }}>
           <h2 style={{ fontSize: 18, marginBottom: 10 }}>Messages</h2>
-
           {messages.length === 0 ? (
             <p>No messages yet.</p>
           ) : (
@@ -213,15 +241,8 @@ export default async function TicketPage({
         </section>
 
         {/* Activity */}
-        <section
-          style={{
-            padding: 12,
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: 10,
-          }}
-        >
+        <section style={{ padding: 12, border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10 }}>
           <h2 style={{ fontSize: 18, marginBottom: 10 }}>Activity</h2>
-
           {audit.length === 0 ? (
             <p>No activity yet.</p>
           ) : (

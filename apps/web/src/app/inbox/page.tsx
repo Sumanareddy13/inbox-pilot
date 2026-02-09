@@ -1,3 +1,11 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabaseClient";
+
+
+
 type Ticket = {
   id: number;
   subject: string;
@@ -9,52 +17,119 @@ type Ticket = {
   created_at: string;
 };
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
-async function fetchTickets(
-  sp: Record<string, string | undefined>
-): Promise<Ticket[]> {
-  const qs = new URLSearchParams();
+export default function InboxPage() {
+  const router = useRouter();
+  const sp = useSearchParams();
 
-  if (sp.status) qs.set("status", sp.status);
-  if (sp.priority) qs.set("priority", sp.priority);
-  if (sp.category) qs.set("category", sp.category);
-  if (sp.assignee) qs.set("assignee", sp.assignee);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
-  const url =
-    qs.toString().length > 0
-      ? `${API_BASE}/tickets?${qs.toString()}`
-      : `${API_BASE}/tickets`;
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to fetch tickets");
+  const filters = useMemo(() => {
+    const qs = new URLSearchParams();
+    const status = sp.get("status");
+    const priority = sp.get("priority");
+    const category = sp.get("category");
+    const assignee = sp.get("assignee");
 
-  return res.json();
-}
+    if (status) qs.set("status", status);
+    if (priority) qs.set("priority", priority);
+    if (category) qs.set("category", category);
+    if (assignee) qs.set("assignee", assignee);
 
-export default async function InboxPage({
-  searchParams,
-}: {
-  searchParams: Promise<Record<string, string | undefined>>;
-}) {
-  // ✅ Next 16: unwrap searchParams ONCE
-  const sp = await searchParams;
+    return qs;
+  }, [sp]);
 
-  const tickets = await fetchTickets(sp);
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token || null;
+
+      console.log("HAS SESSION:", !!data.session);
+      console.log("FULL TOKEN:", token);
+
+      if (token) {
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      console.log("JWT iss:", payload.iss);
+      console.log("JWT aud:", payload.aud);
+    }
+
+
+      setAccessToken(token);
+      setSessionChecked(true);
+
+      if (!token) {
+        router.push("/login");
+        return;
+      }
+    })();
+  }, [router]);
+
+  useEffect(() => {
+    if (!sessionChecked) return;
+    if (!accessToken) return;
+
+    (async () => {
+      try {
+        setLoading(true);
+        setErr(null);
+
+        const url =
+          filters.toString().length > 0
+            ? `${API_BASE}/tickets?${filters.toString()}`
+            : `${API_BASE}/tickets`;
+
+        const res = await fetch(url, {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${res.status} ${text}`);
+        }
+
+        const data = (await res.json()) as Ticket[];
+        setTickets(data);
+      } catch (e: any) {
+        setErr(e.message || "Failed to load tickets");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [sessionChecked, accessToken, filters]);
+
+  async function logout() {
+    await supabase.auth.signOut();
+    router.push("/login");
+  }
+
+  if (!sessionChecked) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
+  }
+
+  if (!accessToken) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
+  }
 
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
-      <h1 style={{ fontSize: 28, marginBottom: 8 }}>Inbox</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h1 style={{ fontSize: 28, marginBottom: 8 }}>Inbox</h1>
+        <button onClick={logout} style={{ padding: "8px 12px" }}>
+          Logout
+        </button>
+      </div>
 
       {/* Filters */}
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          marginBottom: 16,
-          fontSize: 14,
-        }}
-      >
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, fontSize: 14 }}>
         <a href="/inbox">All</a>
         <a href="/inbox?status=open">Open</a>
         <a href="/inbox?priority=high">High Priority</a>
@@ -62,39 +137,46 @@ export default async function InboxPage({
         <a href="/inbox?category=login">Login</a>
       </div>
 
-      <p style={{ marginBottom: 16, opacity: 0.8 }}>
-        Tickets loaded from FastAPI: <b>{tickets.length}</b>
-      </p>
-
-      {tickets.length === 0 ? (
-        <p>No tickets match the current filters.</p>
+      {loading ? (
+        <p>Loading tickets…</p>
+      ) : err ? (
+        <p style={{ color: "tomato" }}>Error: {err}</p>
       ) : (
-        <ul style={{ paddingLeft: 18 }}>
-          {tickets.map((t) => (
-            <li key={t.id} style={{ marginBottom: 14 }}>
-              <div>
-                <a href={`/inbox/${t.id}`}>
-                  <b>#{t.id}</b> — {t.subject}
-                </a>
-              </div>
+        <>
+          <p style={{ marginBottom: 16, opacity: 0.8 }}>
+            Tickets loaded from FastAPI: <b>{tickets.length}</b>
+          </p>
 
-              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                status: {t.status} • priority: {t.priority} • category:{" "}
-                {t.category}
-              </div>
+          {tickets.length === 0 ? (
+            <p>No tickets match the current filters.</p>
+          ) : (
+            <ul style={{ paddingLeft: 18 }}>
+              {tickets.map((t) => (
+                <li key={t.id} style={{ marginBottom: 14 }}>
+                  <div>
+                    <a href={`/inbox/${t.id}`}>
+                      <b>#{t.id}</b> — {t.subject}
+                    </a>
+                  </div>
 
-              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                assignee: {t.assignee ?? "-"} • created: {t.created_at}
-              </div>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    status: {t.status} • priority: {t.priority} • category: {t.category}
+                  </div>
 
-              {t.due_at && (
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  due by: {t.due_at}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    assignee: {t.assignee ?? "-"} • created: {t.created_at}
+                  </div>
+
+                  {t.due_at && (
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      due by: {t.due_at}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </main>
   );

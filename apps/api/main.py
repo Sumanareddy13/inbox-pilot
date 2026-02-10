@@ -18,6 +18,7 @@ from sqlalchemy import select, desc
 
 from db import SessionLocal
 from models import TicketModel, MessageModel, AuditLogModel
+from datetime import datetime, timezone
 
 
 ALLOWED_PRIORITY = {"low", "medium", "high"}
@@ -115,8 +116,6 @@ def _verify_supabase_jwt(token: str) -> dict:
     except Exception as e:
         print("JWT VERIFY ERROR >>>", repr(e))
         raise HTTPException(status_code=401, detail=f"Invalid auth token: {str(e)}")
-
-
 
 
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
@@ -273,17 +272,19 @@ def create_ticket(
     return ticket_to_out(ticket)
 
 
+
 @app.get("/tickets", response_model=List[TicketOut])
 def list_tickets(
     status: Optional[str] = None,
     priority: Optional[str] = None,
     category: Optional[str] = None,
     assignee: Optional[str] = None,
+    overdue: Optional[bool] = None,   # ✅ NEW
     limit: int = 50,
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    _ = user 
+    _ = user
 
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
@@ -299,8 +300,15 @@ def list_tickets(
     if assignee:
         stmt = stmt.where(TicketModel.assignee == assignee)
 
+    if overdue is True:
+        now = datetime.now(timezone.utc)
+        stmt = stmt.where(TicketModel.due_at.isnot(None))
+        stmt = stmt.where(TicketModel.due_at < now)
+        stmt = stmt.where(TicketModel.status != "closed")  
+
     rows = db.execute(stmt).scalars().all()
     return [ticket_to_out(t) for t in rows]
+
 
 
 @app.get("/tickets/{ticket_id}", response_model=TicketOut)

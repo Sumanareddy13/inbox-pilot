@@ -4,8 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-
-
 type Ticket = {
   id: number;
   subject: string;
@@ -18,6 +16,27 @@ type Ticket = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
+
+function formatSla(dueAt: string | null) {
+  if (!dueAt) return "no SLA";
+
+  const due = new Date(dueAt).getTime();
+  const now = Date.now();
+  const diffMs = due - now;
+
+  const abs = Math.abs(diffMs);
+  const mins = Math.floor(abs / (60 * 1000));
+  const hrs = Math.floor(mins / 60);
+  const days = Math.floor(hrs / 24);
+
+  const pretty =
+    days > 0 ? `${days}d ${hrs % 24}h` :
+    hrs > 0 ? `${hrs}h ${mins % 60}m` :
+    `${mins}m`;
+
+  if (diffMs < 0) return `overdue by ${pretty}`;
+  return `due in ${pretty}`;
+}
 
 export default function InboxPage() {
   const router = useRouter();
@@ -36,11 +55,13 @@ export default function InboxPage() {
     const priority = sp.get("priority");
     const category = sp.get("category");
     const assignee = sp.get("assignee");
+    const overdue = sp.get("overdue"); // ✅ NEW
 
     if (status) qs.set("status", status);
     if (priority) qs.set("priority", priority);
     if (category) qs.set("category", category);
     if (assignee) qs.set("assignee", assignee);
+    if (overdue) qs.set("overdue", overdue); // ✅ NEW
 
     return qs;
   }, [sp]);
@@ -49,16 +70,6 @@ export default function InboxPage() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       const token = data.session?.access_token || null;
-
-      console.log("HAS SESSION:", !!data.session);
-      console.log("FULL TOKEN:", token);
-
-      if (token) {
-      const payload = JSON.parse(atob(token.split(".")[1]));
-      console.log("JWT iss:", payload.iss);
-      console.log("JWT aud:", payload.aud);
-    }
-
 
       setAccessToken(token);
       setSessionChecked(true);
@@ -135,6 +146,7 @@ export default function InboxPage() {
         <a href="/inbox?priority=high">High Priority</a>
         <a href="/inbox?category=billing">Billing</a>
         <a href="/inbox?category=login">Login</a>
+        <a href="/inbox?overdue=true">Overdue</a> {/* ✅ NEW */}
       </div>
 
       {loading ? (
@@ -167,11 +179,9 @@ export default function InboxPage() {
                     assignee: {t.assignee ?? "-"} • created: {t.created_at}
                   </div>
 
-                  {t.due_at && (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      due by: {t.due_at}
-                    </div>
-                  )}
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    SLA: {formatSla(t.due_at)}
+                  </div>
                 </li>
               ))}
             </ul>

@@ -3,110 +3,76 @@ load_dotenv()
 
 import os
 import json
-import time
-import requests
-import jwt
-
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
+
+import jwt
+from jwt import PyJWKClient
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, asc
 
 from db import SessionLocal
 from models import TicketModel, MessageModel, AuditLogModel
-from datetime import datetime, timezone
 
 
+# -----------------------------
+# Constants / Validation
+# -----------------------------
 ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
 
+# Sorting whitelist (client can only sort by these)
+ALLOWED_SORT_FIELDS = {
+    "created_at": TicketModel.created_at,
+    "id": TicketModel.id,
+    "priority": TicketModel.priority,
+    "status": TicketModel.status,
+    "category": TicketModel.category,
+    "assignee": TicketModel.assignee,
+    "due_at": TicketModel.due_at,
+}
 
 
-
+# -----------------------------
+# Supabase JWT verification (JWKS)
+# -----------------------------
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "").strip()
 if not SUPABASE_PROJECT_URL:
-    # Fail fast so you don't get silent auth bugs later
     raise RuntimeError("Missing SUPABASE_PROJECT_URL in apps/api/.env")
 
 JWKS_URL = f"{SUPABASE_PROJECT_URL}/auth/v1/.well-known/jwks.json"
 
-_JWKS_CACHE: Dict[str, Any] = {"keys": None, "fetched_at": 0}
-_JWKS_TTL_SECONDS = 60 * 10  # 10 minutes
-
-
-def _get_jwks() -> Dict[str, Any]:
-    now = int(time.time())
-    if _JWKS_CACHE["keys"] and (now - _JWKS_CACHE["fetched_at"] < _JWKS_TTL_SECONDS):
-        return _JWKS_CACHE["keys"]
-
-    r = requests.get(JWKS_URL, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    _JWKS_CACHE["keys"] = data
-    _JWKS_CACHE["fetched_at"] = now
-    return data
+# PyJWT helper that fetches and caches keys internally
+_jwks_client = PyJWKClient(JWKS_URL)
 
 
 def _verify_supabase_jwt(token: str) -> dict:
-
+    """
+    Verifies Supabase access token using JWKS.
+    Works with ES256 or RS256 depending on what Supabase issues.
+    Avoids direct use of jwt.algorithms.ECAlgorithm (which broke for you).
+    """
     try:
-        header = jwt.get_unverified_header(token)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid auth token header")
+        unverified = jwt.get_unverified_header(token)
+        alg = unverified.get("alg")
+        if not alg:
+            raise HTTPException(status_code=401, detail="Invalid auth token (missing alg)")
 
-    kid = header.get("kid")
-    if not kid:
-        raise HTTPException(status_code=401, detail="Invalid auth token (missing kid)")
+        signing_key = _jwks_client.get_signing_key_from_jwt(token).key
 
-    jwks = _get_jwks()
-    key = None
-    for k in jwks.get("keys", []):
-        if k.get("kid") == kid:
-            key = k
-            break
-
-    if not key:
-        # JWKS may have rotated; force refresh once
-        _JWKS_CACHE["keys"] = None
-        jwks = _get_jwks()
-        for k in jwks.get("keys", []):
-            if k.get("kid") == kid:
-                key = k
-                break
-
-    if not key:
-        raise HTTPException(status_code=401, detail="Auth key not found (kid mismatch)")
-
-    try:
-        alg = header.get("alg")
-
-        if alg == "ES256":
-            public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(key))
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=["ES256"],
-                issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
-                options={"verify_aud": False},
-            )
-        elif alg == "RS256":
-            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key))
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
-                options={"verify_aud": False},
-            )
-        else:
-            raise HTTPException(status_code=401, detail=f"Unsupported JWT alg: {alg}")
-
+        payload = jwt.decode(
+            token,
+            signing_key,
+            algorithms=[alg],
+            issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
+            options={"verify_aud": False},
+        )
         return payload
 
     except jwt.ExpiredSignatureError:
@@ -114,23 +80,25 @@ def _verify_supabase_jwt(token: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        print("JWT VERIFY ERROR >>>", repr(e))
+        # Keep message useful for debugging
         raise HTTPException(status_code=401, detail=f"Invalid auth token: {str(e)}")
 
 
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
-
+    """
+    Expects: Authorization: Bearer <access_token>
+    Returns: decoded Supabase JWT payload
+    """
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail=f"Bad Authorization format: {authorization[:30]}")
+        raise HTTPException(status_code=401, detail="Bad Authorization format (expected Bearer token)")
 
     token = authorization.split(" ", 1)[1].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Missing token after Bearer")
 
     return _verify_supabase_jwt(token)
-
 
 
 def actor_from_user(user: dict) -> str:
@@ -141,8 +109,9 @@ def actor_from_user(user: dict) -> str:
     return f"agent:{sub}"
 
 
-
-
+# -----------------------------
+# Pydantic models
+# -----------------------------
 class TicketCreate(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
     priority: str = Field(default="medium")
@@ -190,7 +159,9 @@ class AuditLogOut(BaseModel):
     created_at: str
 
 
-
+# -----------------------------
+# DB helpers
+# -----------------------------
 def get_db():
     db = SessionLocal()
     try:
@@ -199,7 +170,34 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="0.5.0")
+def ticket_to_out(t: TicketModel) -> dict:
+    return {
+        "id": int(t.id),
+        "subject": t.subject,
+        "status": t.status,
+        "priority": t.priority,
+        "category": t.category,
+        "assignee": t.assignee,
+        "due_at": t.due_at.isoformat() if t.due_at else None,
+        "created_at": t.created_at.isoformat() if t.created_at else datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
+    meta_json = json.dumps(meta) if meta is not None else None
+    row = AuditLogModel(
+        ticket_id=ticket_id,
+        actor=actor,
+        action=action,
+        meta_json=meta_json,
+    )
+    db.add(row)
+
+
+# -----------------------------
+# FastAPI app
+# -----------------------------
+app = FastAPI(title="Inbox Pilot API", version="0.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -215,30 +213,9 @@ def healthz():
     return {"status": "ok"}
 
 
-def ticket_to_out(t: TicketModel) -> dict:
-    return {
-        "id": t.id,
-        "subject": t.subject,
-        "status": t.status,
-        "priority": t.priority,
-        "category": t.category,
-        "assignee": t.assignee,
-        "due_at": t.due_at.isoformat() if t.due_at else None,
-        "created_at": t.created_at.isoformat(),
-    }
-
-
-def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
-    meta_json = json.dumps(meta) if meta is not None else None
-    row = AuditLogModel(
-        ticket_id=ticket_id,
-        actor=actor,
-        action=action,
-        meta_json=meta_json,
-    )
-    db.add(row)
-
-
+# -----------------------------
+# Tickets
+# -----------------------------
 @app.post("/tickets", response_model=TicketOut)
 def create_ticket(
     payload: TicketCreate,
@@ -262,7 +239,7 @@ def create_ticket(
 
     log_event(
         db=db,
-        ticket_id=ticket.id,
+        ticket_id=int(ticket.id),
         actor=actor_from_user(user),
         action="ticket.created",
         meta={"subject": ticket.subject, "priority": ticket.priority, "category": ticket.category},
@@ -272,25 +249,45 @@ def create_ticket(
     return ticket_to_out(ticket)
 
 
-
 @app.get("/tickets", response_model=List[TicketOut])
 def list_tickets(
     status: Optional[str] = None,
     priority: Optional[str] = None,
     category: Optional[str] = None,
     assignee: Optional[str] = None,
-    overdue: Optional[bool] = None,   # ✅ NEW
+    overdue: Optional[bool] = None,
+
+    # ✅ Pagination
+    page: int = 1,
     limit: int = 50,
+
+    # ✅ Sorting
+    sort: str = "created_at",
+    dir: str = "desc",
+
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    _ = user
+    _ = user  # auth gate only; not used yet
 
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
 
-    stmt = select(TicketModel).order_by(desc(TicketModel.created_at)).limit(limit)
+    if sort not in ALLOWED_SORT_FIELDS:
+        raise HTTPException(status_code=400, detail=f"sort must be one of: {', '.join(ALLOWED_SORT_FIELDS.keys())}")
+    if dir not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail="dir must be asc or desc")
 
+    sort_col = ALLOWED_SORT_FIELDS[sort]
+    order_fn = desc if dir == "desc" else asc
+
+    offset = (page - 1) * limit
+
+    stmt = select(TicketModel)
+
+    # Filters
     if status:
         stmt = stmt.where(TicketModel.status == status)
     if priority:
@@ -304,11 +301,16 @@ def list_tickets(
         now = datetime.now(timezone.utc)
         stmt = stmt.where(TicketModel.due_at.isnot(None))
         stmt = stmt.where(TicketModel.due_at < now)
-        stmt = stmt.where(TicketModel.status != "closed")  
+        stmt = stmt.where(TicketModel.status != "closed")
+
+    # Sorting (stable ordering with id tie-breaker)
+    stmt = stmt.order_by(order_fn(sort_col), order_fn(TicketModel.id))
+
+    # Pagination
+    stmt = stmt.limit(limit).offset(offset)
 
     rows = db.execute(stmt).scalars().all()
     return [ticket_to_out(t) for t in rows]
-
 
 
 @app.get("/tickets/{ticket_id}", response_model=TicketOut)
@@ -398,7 +400,7 @@ def update_ticket(
 
     log_event(
         db=db,
-        ticket_id=t.id,
+        ticket_id=int(t.id),
         actor=actor_from_user(user),
         action="ticket.updated",
         meta={"changed": changed_fields, "before": before},
@@ -408,7 +410,9 @@ def update_ticket(
     return ticket_to_out(t)
 
 
-
+# -----------------------------
+# Messages
+# -----------------------------
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
 def add_message(
     ticket_id: int,
@@ -434,7 +438,7 @@ def add_message(
 
     log_event(
         db=db,
-        ticket_id=t.id,
+        ticket_id=int(t.id),
         actor=actor_from_user(user),
         action="message.added",
         meta={"sender_type": m.sender_type, "body_preview": (m.body[:80] if m.body else "")},
@@ -442,8 +446,8 @@ def add_message(
     db.commit()
 
     return {
-        "id": m.id,
-        "ticket_id": m.ticket_id,
+        "id": int(m.id),
+        "ticket_id": int(m.ticket_id),
         "sender_type": m.sender_type,
         "body": m.body,
         "created_at": m.created_at.isoformat(),
@@ -471,8 +475,8 @@ def list_messages(
 
     return [
         {
-            "id": m.id,
-            "ticket_id": m.ticket_id,
+            "id": int(m.id),
+            "ticket_id": int(m.ticket_id),
             "sender_type": m.sender_type,
             "body": m.body,
             "created_at": m.created_at.isoformat(),
@@ -481,7 +485,9 @@ def list_messages(
     ]
 
 
-
+# -----------------------------
+# Audit Logs
+# -----------------------------
 @app.get("/tickets/{ticket_id}/audit", response_model=List[AuditLogOut])
 def list_audit_logs(
     ticket_id: int,
@@ -508,8 +514,8 @@ def list_audit_logs(
 
     return [
         {
-            "id": a.id,
-            "ticket_id": a.ticket_id,
+            "id": int(a.id),
+            "ticket_id": int(a.ticket_id),
             "actor": a.actor,
             "action": a.action,
             "meta_json": a.meta_json,

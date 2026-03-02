@@ -3,76 +3,109 @@ load_dotenv()
 
 import os
 import json
+import time
+import requests
+import jwt
+
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-import jwt
-from jwt import PyJWKClient
-
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, asc
+from sqlalchemy import select, desc, asc, func
 
 from db import SessionLocal
 from models import TicketModel, MessageModel, AuditLogModel
 
 
-# -----------------------------
-# Constants / Validation
-# -----------------------------
 ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
 
-# Sorting whitelist (client can only sort by these)
-ALLOWED_SORT_FIELDS = {
-    "created_at": TicketModel.created_at,
-    "id": TicketModel.id,
-    "priority": TicketModel.priority,
-    "status": TicketModel.status,
-    "category": TicketModel.category,
-    "assignee": TicketModel.assignee,
-    "due_at": TicketModel.due_at,
-}
+ALLOWED_SORT_BY = {"created_at", "priority", "due_at", "status"}
+ALLOWED_ORDER = {"asc", "desc"}
 
 
-# -----------------------------
-# Supabase JWT verification (JWKS)
-# -----------------------------
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "").strip()
 if not SUPABASE_PROJECT_URL:
     raise RuntimeError("Missing SUPABASE_PROJECT_URL in apps/api/.env")
 
 JWKS_URL = f"{SUPABASE_PROJECT_URL}/auth/v1/.well-known/jwks.json"
 
-# PyJWT helper that fetches and caches keys internally
-_jwks_client = PyJWKClient(JWKS_URL)
+_JWKS_CACHE: Dict[str, Any] = {"keys": None, "fetched_at": 0}
+_JWKS_TTL_SECONDS = 60 * 10  # 10 minutes
+
+
+def _get_jwks() -> Dict[str, Any]:
+    now = int(time.time())
+    if _JWKS_CACHE["keys"] and (now - _JWKS_CACHE["fetched_at"] < _JWKS_TTL_SECONDS):
+        return _JWKS_CACHE["keys"]
+
+    r = requests.get(JWKS_URL, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    _JWKS_CACHE["keys"] = data
+    _JWKS_CACHE["fetched_at"] = now
+    return data
 
 
 def _verify_supabase_jwt(token: str) -> dict:
-    """
-    Verifies Supabase access token using JWKS.
-    Works with ES256 or RS256 depending on what Supabase issues.
-    Avoids direct use of jwt.algorithms.ECAlgorithm (which broke for you).
-    """
     try:
-        unverified = jwt.get_unverified_header(token)
-        alg = unverified.get("alg")
-        if not alg:
-            raise HTTPException(status_code=401, detail="Invalid auth token (missing alg)")
+        header = jwt.get_unverified_header(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid auth token header")
 
-        signing_key = _jwks_client.get_signing_key_from_jwt(token).key
+    kid = header.get("kid")
+    if not kid:
+        raise HTTPException(status_code=401, detail="Invalid auth token (missing kid)")
 
-        payload = jwt.decode(
-            token,
-            signing_key,
-            algorithms=[alg],
-            issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
-            options={"verify_aud": False},
-        )
+    jwks = _get_jwks()
+    key = None
+    for k in jwks.get("keys", []):
+        if k.get("kid") == kid:
+            key = k
+            break
+
+    if not key:
+        _JWKS_CACHE["keys"] = None
+        jwks = _get_jwks()
+        for k in jwks.get("keys", []):
+            if k.get("kid") == kid:
+                key = k
+                break
+
+    if not key:
+        raise HTTPException(status_code=401, detail="Auth key not found (kid mismatch)")
+
+    try:
+        alg = header.get("alg")
+
+        # NOTE: keep as-is because your environment currently works.
+        # If you ever hit ECAlgorithm missing, that's a PyJWT version mismatch.
+        if alg == "ES256":
+            public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(key))
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["ES256"],
+                issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
+                options={"verify_aud": False},
+            )
+        elif alg == "RS256":
+            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key))
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["RS256"],
+                issuer=f"{SUPABASE_PROJECT_URL}/auth/v1",
+                options={"verify_aud": False},
+            )
+        else:
+            raise HTTPException(status_code=401, detail=f"Unsupported JWT alg: {alg}")
+
         return payload
 
     except jwt.ExpiredSignatureError:
@@ -80,19 +113,15 @@ def _verify_supabase_jwt(token: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        # Keep message useful for debugging
+        print("JWT VERIFY ERROR >>>", repr(e))
         raise HTTPException(status_code=401, detail=f"Invalid auth token: {str(e)}")
 
 
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
-    """
-    Expects: Authorization: Bearer <access_token>
-    Returns: decoded Supabase JWT payload
-    """
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Bad Authorization format (expected Bearer token)")
+        raise HTTPException(status_code=401, detail=f"Bad Authorization format: {authorization[:30]}")
 
     token = authorization.split(" ", 1)[1].strip()
     if not token:
@@ -109,9 +138,6 @@ def actor_from_user(user: dict) -> str:
     return f"agent:{sub}"
 
 
-# -----------------------------
-# Pydantic models
-# -----------------------------
 class TicketCreate(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
     priority: str = Field(default="medium")
@@ -159,9 +185,6 @@ class AuditLogOut(BaseModel):
     created_at: str
 
 
-# -----------------------------
-# DB helpers
-# -----------------------------
 def get_db():
     db = SessionLocal()
     try:
@@ -170,33 +193,6 @@ def get_db():
         db.close()
 
 
-def ticket_to_out(t: TicketModel) -> dict:
-    return {
-        "id": int(t.id),
-        "subject": t.subject,
-        "status": t.status,
-        "priority": t.priority,
-        "category": t.category,
-        "assignee": t.assignee,
-        "due_at": t.due_at.isoformat() if t.due_at else None,
-        "created_at": t.created_at.isoformat() if t.created_at else datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
-    meta_json = json.dumps(meta) if meta is not None else None
-    row = AuditLogModel(
-        ticket_id=ticket_id,
-        actor=actor,
-        action=action,
-        meta_json=meta_json,
-    )
-    db.add(row)
-
-
-# -----------------------------
-# FastAPI app
-# -----------------------------
 app = FastAPI(title="Inbox Pilot API", version="0.6.0")
 
 app.add_middleware(
@@ -213,9 +209,30 @@ def healthz():
     return {"status": "ok"}
 
 
-# -----------------------------
-# Tickets
-# -----------------------------
+def ticket_to_out(t: TicketModel) -> dict:
+    return {
+        "id": int(t.id),
+        "subject": t.subject,
+        "status": t.status,
+        "priority": t.priority,
+        "category": t.category,
+        "assignee": t.assignee,
+        "due_at": t.due_at.isoformat() if t.due_at else None,
+        "created_at": t.created_at.isoformat(),
+    }
+
+
+def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
+    meta_json = json.dumps(meta) if meta is not None else None
+    row = AuditLogModel(
+        ticket_id=ticket_id,
+        actor=actor,
+        action=action,
+        meta_json=meta_json,
+    )
+    db.add(row)
+
+
 @app.post("/tickets", response_model=TicketOut)
 def create_ticket(
     payload: TicketCreate,
@@ -251,66 +268,81 @@ def create_ticket(
 
 @app.get("/tickets", response_model=List[TicketOut])
 def list_tickets(
+    response: Response,
     status: Optional[str] = None,
     priority: Optional[str] = None,
     category: Optional[str] = None,
     assignee: Optional[str] = None,
     overdue: Optional[bool] = None,
-
-    # ✅ Pagination
-    page: int = 1,
-    limit: int = 50,
-
-    # ✅ Sorting
-    sort: str = "created_at",
-    dir: str = "desc",
-
+    limit: int = 20,
+    offset: int = 0,
+    sort_by: str = "created_at",
+    order: str = "desc",
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    _ = user  # auth gate only; not used yet
+    _ = user
 
-    if page < 1:
-        raise HTTPException(status_code=400, detail="page must be >= 1")
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    if sort_by not in ALLOWED_SORT_BY:
+        raise HTTPException(status_code=400, detail=f"sort_by must be one of {sorted(ALLOWED_SORT_BY)}")
+    if order not in ALLOWED_ORDER:
+        raise HTTPException(status_code=400, detail="order must be asc or desc")
 
-    if sort not in ALLOWED_SORT_FIELDS:
-        raise HTTPException(status_code=400, detail=f"sort must be one of: {', '.join(ALLOWED_SORT_FIELDS.keys())}")
-    if dir not in {"asc", "desc"}:
-        raise HTTPException(status_code=400, detail="dir must be asc or desc")
+    base_stmt = select(TicketModel)
 
-    sort_col = ALLOWED_SORT_FIELDS[sort]
-    order_fn = desc if dir == "desc" else asc
-
-    offset = (page - 1) * limit
-
-    stmt = select(TicketModel)
-
-    # Filters
     if status:
-        stmt = stmt.where(TicketModel.status == status)
+        base_stmt = base_stmt.where(TicketModel.status == status)
     if priority:
-        stmt = stmt.where(TicketModel.priority == priority)
+        base_stmt = base_stmt.where(TicketModel.priority == priority)
     if category:
-        stmt = stmt.where(TicketModel.category == category)
+        base_stmt = base_stmt.where(TicketModel.category == category)
     if assignee:
-        stmt = stmt.where(TicketModel.assignee == assignee)
+        base_stmt = base_stmt.where(TicketModel.assignee == assignee)
 
     if overdue is True:
         now = datetime.now(timezone.utc)
-        stmt = stmt.where(TicketModel.due_at.isnot(None))
-        stmt = stmt.where(TicketModel.due_at < now)
-        stmt = stmt.where(TicketModel.status != "closed")
+        base_stmt = base_stmt.where(TicketModel.due_at.isnot(None))
+        base_stmt = base_stmt.where(TicketModel.due_at < now)
+        base_stmt = base_stmt.where(TicketModel.status != "closed")
 
-    # Sorting (stable ordering with id tie-breaker)
-    stmt = stmt.order_by(order_fn(sort_col), order_fn(TicketModel.id))
+    # total count (same filters)
+    count_stmt = select(func.count()).select_from(base_stmt.subquery())
+    total = db.execute(count_stmt).scalar_one()
 
-    # Pagination
-    stmt = stmt.limit(limit).offset(offset)
+    # sorting
+    sort_col = {
+        "created_at": TicketModel.created_at,
+        "priority": TicketModel.priority,
+        "due_at": TicketModel.due_at,
+        "status": TicketModel.status,
+    }[sort_by]
+
+    if order == "asc":
+        base_stmt = base_stmt.order_by(asc(sort_col), asc(TicketModel.id))
+    else:
+        base_stmt = base_stmt.order_by(desc(sort_col), desc(TicketModel.id))
+
+    stmt = base_stmt.limit(limit).offset(offset)
 
     rows = db.execute(stmt).scalars().all()
-    return [ticket_to_out(t) for t in rows]
+    out = [ticket_to_out(t) for t in rows]
+
+    response.headers["X-Total-Count"] = str(total)
+
+    next_offset = offset + len(rows)
+    if next_offset < total:
+        response.headers["X-Next-Offset"] = str(next_offset)
+    else:
+        response.headers["X-Next-Offset"] = ""
+
+    response.headers["X-Limit"] = str(limit)
+    response.headers["X-Offset"] = str(offset)
+
+    return out
 
 
 @app.get("/tickets/{ticket_id}", response_model=TicketOut)
@@ -410,9 +442,6 @@ def update_ticket(
     return ticket_to_out(t)
 
 
-# -----------------------------
-# Messages
-# -----------------------------
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
 def add_message(
     ticket_id: int,
@@ -485,9 +514,6 @@ def list_messages(
     ]
 
 
-# -----------------------------
-# Audit Logs
-# -----------------------------
 @app.get("/tickets/{ticket_id}/audit", response_model=List[AuditLogOut])
 def list_audit_logs(
     ticket_id: int,

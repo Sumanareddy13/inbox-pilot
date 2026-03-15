@@ -36,7 +36,7 @@ if not SUPABASE_PROJECT_URL:
 JWKS_URL = f"{SUPABASE_PROJECT_URL}/auth/v1/.well-known/jwks.json"
 
 _JWKS_CACHE: Dict[str, Any] = {"keys": None, "fetched_at": 0}
-_JWKS_TTL_SECONDS = 60 * 10  # 10 minutes
+_JWKS_TTL_SECONDS = 60 * 10
 
 
 def _get_jwks() -> Dict[str, Any]:
@@ -83,8 +83,6 @@ def _verify_supabase_jwt(token: str) -> dict:
     try:
         alg = header.get("alg")
 
-        # NOTE: keep as-is because your environment currently works.
-        # If you ever hit ECAlgorithm missing, that's a PyJWT version mismatch.
         if alg == "ES256":
             public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(key))
             payload = jwt.decode(
@@ -149,7 +147,7 @@ class TicketUpdate(BaseModel):
     priority: Optional[str] = None
     category: Optional[str] = None
     assignee: Optional[str] = None
-    due_at: Optional[str] = None  # ISO string; "" clears
+    due_at: Optional[str] = None
 
 
 class TicketOut(BaseModel):
@@ -193,7 +191,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="0.6.0")
+app = FastAPI(title="Inbox Pilot API", version="0.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -269,6 +267,7 @@ def create_ticket(
 @app.get("/tickets", response_model=List[TicketOut])
 def list_tickets(
     response: Response,
+    q: Optional[str] = None,
     status: Optional[str] = None,
     priority: Optional[str] = None,
     category: Optional[str] = None,
@@ -294,6 +293,8 @@ def list_tickets(
 
     base_stmt = select(TicketModel)
 
+    if q:
+        base_stmt = base_stmt.where(TicketModel.subject.ilike(f"%{q.strip()}%"))
     if status:
         base_stmt = base_stmt.where(TicketModel.status == status)
     if priority:
@@ -309,11 +310,9 @@ def list_tickets(
         base_stmt = base_stmt.where(TicketModel.due_at < now)
         base_stmt = base_stmt.where(TicketModel.status != "closed")
 
-    # total count (same filters)
     count_stmt = select(func.count()).select_from(base_stmt.subquery())
     total = db.execute(count_stmt).scalar_one()
 
-    # sorting
     sort_col = {
         "created_at": TicketModel.created_at,
         "priority": TicketModel.priority,

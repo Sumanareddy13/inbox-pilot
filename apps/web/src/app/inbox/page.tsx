@@ -19,7 +19,12 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
 function formatDateShort(iso: string) {
   const d = new Date(iso);
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function formatSla(dueAt: string | null) {
@@ -35,9 +40,7 @@ function formatSla(dueAt: string | null) {
   const days = Math.floor(hrs / 24);
 
   const pretty =
-    days > 0 ? `${days}d ${hrs % 24}h` :
-    hrs > 0 ? `${hrs}h ${mins % 60}m` :
-    `${mins}m`;
+    days > 0 ? `${days}d ${hrs % 24}h` : hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
 
   if (diffMs < 0) return `Overdue ${pretty}`;
   return `Due ${pretty}`;
@@ -57,7 +60,6 @@ function pillStyle(kind: "status" | "priority" | "category" | "sla", value: stri
     whiteSpace: "nowrap" as const,
   };
 
-  // just visual polish
   if (kind === "status") {
     if (value === "open") return { ...base, borderColor: "rgba(34,197,94,0.35)", background: "rgba(34,197,94,0.10)" };
     if (value === "closed") return { ...base, borderColor: "rgba(148,163,184,0.28)", background: "rgba(148,163,184,0.10)" };
@@ -80,10 +82,13 @@ function pillStyle(kind: "status" | "priority" | "category" | "sla", value: stri
 
 function statCard(title: string, value: number, accent: "neutral" | "green" | "red" | "amber") {
   const accentBorder =
-    accent === "green" ? "rgba(34,197,94,0.32)" :
-    accent === "red" ? "rgba(239,68,68,0.32)" :
-    accent === "amber" ? "rgba(245,158,11,0.32)" :
-    "rgba(255,255,255,0.12)";
+    accent === "green"
+      ? "rgba(34,197,94,0.32)"
+      : accent === "red"
+      ? "rgba(239,68,68,0.32)"
+      : accent === "amber"
+      ? "rgba(245,158,11,0.32)"
+      : "rgba(255,255,255,0.12)";
 
   return (
     <div
@@ -111,14 +116,21 @@ export default function InboxPage() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-
   const [total, setTotal] = useState<number>(0);
 
-  // --- query state (from URL) ---
+  const [searchInput, setSearchInput] = useState(sp.get("q") || "");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+
+  const [newSubject, setNewSubject] = useState("");
+  const [newPriority, setNewPriority] = useState("medium");
+  const [newCategory, setNewCategory] = useState("other");
+
   const limit = Math.min(Math.max(parseInt(sp.get("limit") || "20", 10), 1), 200);
   const offset = Math.max(parseInt(sp.get("offset") || "0", 10), 0);
   const sortBy = sp.get("sort_by") || "created_at";
   const order = sp.get("order") || "desc";
+  const q = sp.get("q") || "";
 
   const filters = useMemo(() => {
     const qs = new URLSearchParams();
@@ -129,6 +141,7 @@ export default function InboxPage() {
     const assignee = sp.get("assignee");
     const overdue = sp.get("overdue");
 
+    if (q) qs.set("q", q);
     if (status) qs.set("status", status);
     if (priority) qs.set("priority", priority);
     if (category) qs.set("category", category);
@@ -141,18 +154,21 @@ export default function InboxPage() {
     qs.set("order", order);
 
     return qs;
-  }, [sp, limit, offset, sortBy, order]);
+  }, [sp, limit, offset, sortBy, order, q]);
 
   function setQS(patch: Record<string, string | null>) {
     const qs = new URLSearchParams(sp.toString());
     Object.entries(patch).forEach(([k, v]) => {
-      if (v === null) qs.delete(k);
+      if (v === null || v === "") qs.delete(k);
       else qs.set(k, v);
     });
     router.push(`/inbox?${qs.toString()}`);
   }
 
-  // --- auth ---
+  useEffect(() => {
+    setSearchInput(sp.get("q") || "");
+  }, [sp]);
+
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -168,7 +184,6 @@ export default function InboxPage() {
     })();
   }, [router]);
 
-  // --- fetch tickets ---
   async function fetchTickets() {
     if (!accessToken) return;
 
@@ -213,13 +228,57 @@ export default function InboxPage() {
     router.push("/login");
   }
 
-  // --- stats computed from current page ---
+  async function createTicket() {
+    if (!accessToken) return;
+
+    const subject = newSubject.trim();
+    if (subject.length < 3) {
+      alert("Subject must be at least 3 characters.");
+      return;
+    }
+
+    try {
+      setCreating(true);
+
+      const res = await fetch(`${API_BASE}/tickets`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          subject,
+          priority: newPriority,
+          category: newCategory,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status} ${text}`);
+      }
+
+      const created = (await res.json()) as Ticket;
+
+      setCreateOpen(false);
+      setNewSubject("");
+      setNewPriority("medium");
+      setNewCategory("other");
+
+      await fetchTickets();
+      router.push(`/inbox/${created.id}`);
+    } catch (e: any) {
+      alert(e?.message || "Failed to create ticket");
+    } finally {
+      setCreating(false);
+    }
+  }
+
   const stats = useMemo(() => {
     const totalCount = tickets.length;
     const open = tickets.filter((t) => t.status === "open").length;
     const closed = tickets.filter((t) => t.status === "closed").length;
     const high = tickets.filter((t) => t.priority === "high").length;
-
     const overdue = tickets.filter((t) => {
       if (!t.due_at) return false;
       if (t.status === "closed") return false;
@@ -266,34 +325,66 @@ export default function InboxPage() {
 
           <div style={{ display: "flex", gap: 10 }}>
             <button
+              onClick={() => setCreateOpen(true)}
+              style={topBtn(true)}
+            >
+              New Ticket
+            </button>
+            <button
               onClick={() => fetchTickets()}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.06)",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: 700,
-              }}
+              style={topBtn(false)}
             >
               Refresh
             </button>
             <button
               onClick={logout}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.06)",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: 700,
-              }}
+              style={topBtn(false)}
             >
               Logout
             </button>
           </div>
+        </div>
+
+        {/* Search */}
+        <div
+          style={{
+            marginTop: 18,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search tickets by subject..."
+            style={{
+              flex: "1 1 320px",
+              minWidth: 280,
+              padding: "12px 14px",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.16)",
+              background: "rgba(255,255,255,0.06)",
+              color: "white",
+              outline: "none",
+            }}
+          />
+          <button
+            onClick={() => setQS({ q: searchInput.trim() || null, offset: "0" })}
+            style={actionBtn()}
+          >
+            Search
+          </button>
+          <button
+            onClick={() => {
+              setSearchInput("");
+              setQS({ q: null, offset: "0" });
+            }}
+            style={actionBtn()}
+          >
+            Reset
+          </button>
         </div>
 
         {/* Filter pills */}
@@ -356,19 +447,12 @@ export default function InboxPage() {
           </div>
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {/* Page size */}
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ fontSize: 12, opacity: 0.85 }}>Page size</span>
               <select
                 value={String(limit)}
                 onChange={(e) => setQS({ limit: e.target.value, offset: "0" })}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "white",
-                }}
+                style={selectStyle()}
               >
                 <option value="10">10</option>
                 <option value="20">20</option>
@@ -376,19 +460,12 @@ export default function InboxPage() {
               </select>
             </div>
 
-            {/* Sort */}
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ fontSize: 12, opacity: 0.85 }}>Sort</span>
               <select
                 value={sortBy}
                 onChange={(e) => setQS({ sort_by: e.target.value, offset: "0" })}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "white",
-                }}
+                style={selectStyle()}
               >
                 <option value="created_at">Created</option>
                 <option value="priority">Priority</option>
@@ -398,52 +475,24 @@ export default function InboxPage() {
 
               <button
                 onClick={() => setQS({ order: order === "asc" ? "desc" : "asc", offset: "0" })}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "white",
-                  cursor: "pointer",
-                  fontWeight: 700,
-                }}
-                title="Toggle sort order"
+                style={actionBtn()}
               >
                 {order === "asc" ? "↑ ASC" : "↓ DESC"}
               </button>
             </div>
 
-            {/* Pagination */}
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 disabled={!canPrev || loading}
                 onClick={() => setQS({ offset: String(Math.max(offset - limit, 0)) })}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  background: !canPrev || loading ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)",
-                  color: "white",
-                  cursor: !canPrev || loading ? "not-allowed" : "pointer",
-                  opacity: !canPrev || loading ? 0.55 : 1,
-                  fontWeight: 800,
-                }}
+                style={pageBtn(!canPrev || loading)}
               >
                 Prev
               </button>
               <button
                 disabled={!canNext || loading}
                 onClick={() => setQS({ offset: String(offset + limit) })}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  background: !canNext || loading ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)",
-                  color: "white",
-                  cursor: !canNext || loading ? "not-allowed" : "pointer",
-                  opacity: !canNext || loading ? 0.55 : 1,
-                  fontWeight: 800,
-                }}
+                style={pageBtn(!canNext || loading)}
               >
                 Next
               </button>
@@ -464,7 +513,7 @@ export default function InboxPage() {
           <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
             <div style={{ fontWeight: 900 }}>Tickets</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-              Tip: “Overdue” is computed from SLA due_at + status != closed (current view).
+              Tip: search works on subject text. Overdue is based on due_at + status != closed.
             </div>
           </div>
 
@@ -474,24 +523,15 @@ export default function InboxPage() {
             <div style={{ padding: 16, color: "tomato" }}>
               {err}
               <div style={{ marginTop: 10 }}>
-                <button
-                  onClick={() => fetchTickets()}
-                  style={{
-                    padding: "8px 12px",
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.16)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "white",
-                    cursor: "pointer",
-                    fontWeight: 800,
-                  }}
-                >
+                <button onClick={() => fetchTickets()} style={actionBtn()}>
                   Retry
                 </button>
               </div>
             </div>
           ) : tickets.length === 0 ? (
-            <div style={{ padding: 16, opacity: 0.85 }}>No tickets match these filters.</div>
+            <div style={{ padding: 16, opacity: 0.85 }}>
+              {q ? `No tickets matched "${q}".` : "No tickets match these filters."}
+            </div>
           ) : (
             <div style={{ width: "100%", overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -511,12 +551,7 @@ export default function InboxPage() {
                   {tickets.map((t) => {
                     const slaText = formatSla(t.due_at);
                     return (
-                      <tr
-                        key={t.id}
-                        style={{
-                          borderTop: "1px solid rgba(255,255,255,0.08)",
-                        }}
-                      >
+                      <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
                         <td style={{ padding: "12px 14px" }}>
                           <div style={{ fontWeight: 900, fontSize: 14 }}>
                             <a
@@ -561,6 +596,166 @@ export default function InboxPage() {
           )}
         </section>
       </div>
+
+      {createOpen && (
+        <div style={overlayStyle}>
+          <div style={modalStyle}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 900 }}>Create Ticket</div>
+                <div style={{ fontSize: 13, opacity: 0.76, marginTop: 4 }}>
+                  Add a new support ticket to the inbox
+                </div>
+              </div>
+              <button onClick={() => setCreateOpen(false)} style={closeBtnStyle}>
+                ✕
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gap: 14, marginTop: 18 }}>
+              <div>
+                <div style={labelStyle}>Subject</div>
+                <input
+                  value={newSubject}
+                  onChange={(e) => setNewSubject(e.target.value)}
+                  placeholder="Example: Payment failed for customer order"
+                  style={inputStyle}
+                />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <div style={labelStyle}>Priority</div>
+                  <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} style={selectStyle()}>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div style={labelStyle}>Category</div>
+                  <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} style={selectStyle()}>
+                    <option value="billing">billing</option>
+                    <option value="login">login</option>
+                    <option value="refund">refund</option>
+                    <option value="other">other</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+              <button onClick={() => setCreateOpen(false)} style={actionBtn()}>
+                Cancel
+              </button>
+              <button onClick={createTicket} disabled={creating} style={topBtn(true)}>
+                {creating ? "Creating..." : "Create Ticket"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
+
+function topBtn(primary: boolean): React.CSSProperties {
+  return {
+    padding: "10px 14px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: primary ? "rgba(59,130,246,0.18)" : "rgba(255,255,255,0.06)",
+    color: "white",
+    cursor: "pointer",
+    fontWeight: 700,
+  };
+}
+
+function actionBtn(): React.CSSProperties {
+  return {
+    padding: "8px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.06)",
+    color: "white",
+    cursor: "pointer",
+    fontWeight: 700,
+  };
+}
+
+function pageBtn(disabled: boolean): React.CSSProperties {
+  return {
+    padding: "8px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: disabled ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)",
+    color: "white",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.55 : 1,
+    fontWeight: 800,
+  };
+}
+
+function selectStyle(): React.CSSProperties {
+  return {
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.06)",
+    color: "white",
+    width: "100%",
+  };
+}
+
+const overlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.55)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 20,
+  zIndex: 9999,
+};
+
+const modalStyle: React.CSSProperties = {
+  width: "100%",
+  maxWidth: 560,
+  borderRadius: 18,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background:
+    "linear-gradient(180deg, rgba(17,24,39,0.98), rgba(10,15,28,0.98))",
+  color: "white",
+  padding: 20,
+  boxShadow: "0 20px 80px rgba(0,0,0,0.45)",
+};
+
+const closeBtnStyle: React.CSSProperties = {
+  width: 36,
+  height: 36,
+  borderRadius: 10,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.06)",
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 700,
+};
+
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "12px 14px",
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.16)",
+  background: "rgba(255,255,255,0.06)",
+  color: "white",
+  outline: "none",
+  boxSizing: "border-box",
+};
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 12,
+  opacity: 0.82,
+  marginBottom: 6,
+  fontWeight: 700,
+};

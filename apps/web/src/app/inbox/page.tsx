@@ -181,6 +181,7 @@ export default function InboxPage() {
   const [newCategory, setNewCategory] = useState("other");
 
   const [assigningTicketId, setAssigningTicketId] = useState<number | null>(null);
+  const [statusUpdatingTicketId, setStatusUpdatingTicketId] = useState<number | null>(null);
 
   const assignees = useMemo(() => getAssignees(), []);
 
@@ -302,6 +303,20 @@ export default function InboxPage() {
       alert(e?.message || "Failed to assign ticket");
     } finally {
       setAssigningTicketId(null);
+    }
+  }
+
+  async function toggleTicketStatus(ticket: Ticket) {
+    const nextStatus = ticket.status === "closed" ? "open" : "closed";
+
+    try {
+      setStatusUpdatingTicketId(ticket.id);
+      await updateTicket(ticket.id, { status: nextStatus });
+      await fetchTickets();
+    } catch (e: any) {
+      alert(e?.message || "Failed to update ticket status");
+    } finally {
+      setStatusUpdatingTicketId(null);
     }
   }
 
@@ -625,6 +640,7 @@ export default function InboxPage() {
                   {tickets.map((t) => {
                     const slaText = formatSla(t.due_at);
                     const isAssigning = assigningTicketId === t.id;
+                    const isUpdatingStatus = statusUpdatingTicketId === t.id;
 
                     return (
                       <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
@@ -640,7 +656,26 @@ export default function InboxPage() {
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <span style={pillStyle("status", t.status)}>{t.status}</span>
+                          <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
+                            <span style={pillStyle("status", t.status)}>{t.status}</span>
+                            <button
+                              disabled={isUpdatingStatus}
+                              onClick={() => {
+                                void toggleTicketStatus(t);
+                              }}
+                              style={{
+                                ...miniActionBtn(),
+                                opacity: isUpdatingStatus ? 0.65 : 1,
+                                cursor: isUpdatingStatus ? "wait" : "pointer",
+                              }}
+                            >
+                              {isUpdatingStatus
+                                ? "Updating..."
+                                : t.status === "closed"
+                                ? "Reopen"
+                                : "Close"}
+                            </button>
+                          </div>
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
@@ -778,6 +813,18 @@ function actionBtn(): React.CSSProperties {
     background: "rgba(255,255,255,0.06)",
     color: "white",
     cursor: "pointer",
+    fontWeight: 700,
+  };
+}
+
+function miniActionBtn(): React.CSSProperties {
+  return {
+    padding: "6px 10px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.06)",
+    color: "white",
+    fontSize: 12,
     fontWeight: 700,
   };
 }

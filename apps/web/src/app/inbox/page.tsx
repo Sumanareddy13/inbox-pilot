@@ -17,6 +17,14 @@ type Ticket = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
+function getAssignees(): string[] {
+  const raw = process.env.NEXT_PUBLIC_ASSIGNEES || "Sumana";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function formatDateShort(iso: string) {
   const d = new Date(iso);
   return d.toLocaleString(undefined, {
@@ -61,20 +69,66 @@ function pillStyle(kind: "status" | "priority" | "category" | "sla", value: stri
   };
 
   if (kind === "status") {
-    if (value === "open") return { ...base, borderColor: "rgba(34,197,94,0.35)", background: "rgba(34,197,94,0.10)" };
-    if (value === "closed") return { ...base, borderColor: "rgba(148,163,184,0.28)", background: "rgba(148,163,184,0.10)" };
+    if (value === "open") {
+      return {
+        ...base,
+        borderColor: "rgba(34,197,94,0.35)",
+        background: "rgba(34,197,94,0.10)",
+      };
+    }
+    if (value === "closed") {
+      return {
+        ...base,
+        borderColor: "rgba(148,163,184,0.28)",
+        background: "rgba(148,163,184,0.10)",
+      };
+    }
   }
 
   if (kind === "priority") {
-    if (value === "high") return { ...base, borderColor: "rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.10)" };
-    if (value === "medium") return { ...base, borderColor: "rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.10)" };
-    if (value === "low") return { ...base, borderColor: "rgba(59,130,246,0.35)", background: "rgba(59,130,246,0.10)" };
+    if (value === "high") {
+      return {
+        ...base,
+        borderColor: "rgba(239,68,68,0.35)",
+        background: "rgba(239,68,68,0.10)",
+      };
+    }
+    if (value === "medium") {
+      return {
+        ...base,
+        borderColor: "rgba(245,158,11,0.35)",
+        background: "rgba(245,158,11,0.10)",
+      };
+    }
+    if (value === "low") {
+      return {
+        ...base,
+        borderColor: "rgba(59,130,246,0.35)",
+        background: "rgba(59,130,246,0.10)",
+      };
+    }
   }
 
   if (kind === "sla") {
-    if (value.toLowerCase().startsWith("overdue")) return { ...base, borderColor: "rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.10)" };
-    if (value.toLowerCase().startsWith("due")) return { ...base, borderColor: "rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.10)" };
-    return { ...base, borderColor: "rgba(148,163,184,0.28)", background: "rgba(148,163,184,0.10)" };
+    if (value.toLowerCase().startsWith("overdue")) {
+      return {
+        ...base,
+        borderColor: "rgba(239,68,68,0.35)",
+        background: "rgba(239,68,68,0.10)",
+      };
+    }
+    if (value.toLowerCase().startsWith("due")) {
+      return {
+        ...base,
+        borderColor: "rgba(245,158,11,0.35)",
+        background: "rgba(245,158,11,0.10)",
+      };
+    }
+    return {
+      ...base,
+      borderColor: "rgba(148,163,184,0.28)",
+      background: "rgba(148,163,184,0.10)",
+    };
   }
 
   return base;
@@ -125,6 +179,10 @@ export default function InboxPage() {
   const [newSubject, setNewSubject] = useState("");
   const [newPriority, setNewPriority] = useState("medium");
   const [newCategory, setNewCategory] = useState("other");
+
+  const [assigningTicketId, setAssigningTicketId] = useState<number | null>(null);
+
+  const assignees = useMemo(() => getAssignees(), []);
 
   const limit = Math.min(Math.max(parseInt(sp.get("limit") || "20", 10), 1), 200);
   const offset = Math.max(parseInt(sp.get("offset") || "0", 10), 0);
@@ -213,6 +271,37 @@ export default function InboxPage() {
       setTotal(0);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function updateTicket(ticketId: number, body: Record<string, unknown>) {
+    if (!accessToken) return;
+
+    const res = await fetch(`${API_BASE}/tickets/${ticketId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status} ${text}`);
+    }
+  }
+
+  async function assignTicket(ticketId: number, assignee: string) {
+    try {
+      setAssigningTicketId(ticketId);
+      await updateTicket(ticketId, { assignee });
+      await fetchTickets();
+    } catch (e: any) {
+      alert(e?.message || "Failed to assign ticket");
+    } finally {
+      setAssigningTicketId(null);
     }
   }
 
@@ -315,7 +404,6 @@ export default function InboxPage() {
       }}
     >
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-        {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14 }}>
           <div>
             <div style={{ fontSize: 12, letterSpacing: 1, opacity: 0.85 }}>INBOX PILOT</div>
@@ -324,28 +412,18 @@ export default function InboxPage() {
           </div>
 
           <div style={{ display: "flex", gap: 10 }}>
-            <button
-              onClick={() => setCreateOpen(true)}
-              style={topBtn(true)}
-            >
+            <button onClick={() => setCreateOpen(true)} style={topBtn(true)}>
               New Ticket
             </button>
-            <button
-              onClick={() => fetchTickets()}
-              style={topBtn(false)}
-            >
+            <button onClick={() => fetchTickets()} style={topBtn(false)}>
               Refresh
             </button>
-            <button
-              onClick={logout}
-              style={topBtn(false)}
-            >
+            <button onClick={logout} style={topBtn(false)}>
               Logout
             </button>
           </div>
         </div>
 
-        {/* Search */}
         <div
           style={{
             marginTop: 18,
@@ -387,7 +465,6 @@ export default function InboxPage() {
           </button>
         </div>
 
-        {/* Filter pills */}
         <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
           {[
             { label: "All", qs: { status: null, priority: null, category: null, overdue: null, offset: "0" } },
@@ -416,7 +493,6 @@ export default function InboxPage() {
           ))}
         </div>
 
-        {/* Stats */}
         <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
           {statCard("Total (page)", stats.totalCount, "neutral")}
           {statCard("Open (page)", stats.open, "green")}
@@ -425,7 +501,6 @@ export default function InboxPage() {
           {statCard("High Priority (page)", stats.high, "amber")}
         </div>
 
-        {/* Controls row */}
         <div
           style={{
             marginTop: 16,
@@ -500,7 +575,6 @@ export default function InboxPage() {
           </div>
         </div>
 
-        {/* Table */}
         <section
           style={{
             marginTop: 14,
@@ -550,14 +624,13 @@ export default function InboxPage() {
                 <tbody>
                   {tickets.map((t) => {
                     const slaText = formatSla(t.due_at);
+                    const isAssigning = assigningTicketId === t.id;
+
                     return (
                       <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
                         <td style={{ padding: "12px 14px" }}>
                           <div style={{ fontWeight: 900, fontSize: 14 }}>
-                            <a
-                              href={`/inbox/${t.id}`}
-                              style={{ color: "white", textDecoration: "none" }}
-                            >
+                            <a href={`/inbox/${t.id}`} style={{ color: "white", textDecoration: "none" }}>
                               #{t.id} — {t.subject}
                             </a>
                           </div>
@@ -578,7 +651,32 @@ export default function InboxPage() {
                           <span style={pillStyle("category", t.category)}>{t.category}</span>
                         </td>
 
-                        <td style={{ padding: "12px 14px" }}>{t.assignee ?? "—"}</td>
+                        <td style={{ padding: "12px 14px" }}>
+                          <div style={{ display: "grid", gap: 6 }}>
+                            <select
+                              value={t.assignee ?? ""}
+                              disabled={isAssigning}
+                              onChange={(e) => {
+                                void assignTicket(t.id, e.target.value);
+                              }}
+                              style={{
+                                ...rowSelectStyle(),
+                                opacity: isAssigning ? 0.65 : 1,
+                                cursor: isAssigning ? "wait" : "pointer",
+                              }}
+                            >
+                              <option value="">Unassigned</option>
+                              {assignees.map((name) => (
+                                <option key={name} value={name}>
+                                  {name}
+                                </option>
+                              ))}
+                            </select>
+                            {isAssigning && (
+                              <span style={{ fontSize: 11, opacity: 0.7 }}>Updating assignee...</span>
+                            )}
+                          </div>
+                        </td>
 
                         <td style={{ padding: "12px 14px" }}>
                           <span style={pillStyle("sla", slaText)}>{slaText}</span>
@@ -708,6 +806,17 @@ function selectStyle(): React.CSSProperties {
   };
 }
 
+function rowSelectStyle(): React.CSSProperties {
+  return {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.06)",
+    color: "white",
+    minWidth: 140,
+  };
+}
+
 const overlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
@@ -724,8 +833,7 @@ const modalStyle: React.CSSProperties = {
   maxWidth: 560,
   borderRadius: 18,
   border: "1px solid rgba(255,255,255,0.12)",
-  background:
-    "linear-gradient(180deg, rgba(17,24,39,0.98), rgba(10,15,28,0.98))",
+  background: "linear-gradient(180deg, rgba(17,24,39,0.98), rgba(10,15,28,0.98))",
   color: "white",
   padding: 20,
   boxShadow: "0 20px 80px rgba(0,0,0,0.45)",

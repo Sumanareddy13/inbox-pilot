@@ -180,8 +180,8 @@ export default function InboxPage() {
   const [newPriority, setNewPriority] = useState("medium");
   const [newCategory, setNewCategory] = useState("other");
 
-  const [assigningTicketId, setAssigningTicketId] = useState<number | null>(null);
-  const [statusUpdatingTicketId, setStatusUpdatingTicketId] = useState<number | null>(null);
+  const [updatingRowId, setUpdatingRowId] = useState<number | null>(null);
+  const [rowActionMessage, setRowActionMessage] = useState<Record<number, string>>({});
 
   const assignees = useMemo(() => getAssignees(), []);
   const searchInitRef = useRef(false);
@@ -319,30 +319,38 @@ export default function InboxPage() {
     }
   }
 
-  async function assignTicket(ticketId: number, assignee: string) {
+  async function runRowAction(ticketId: number, message: string, action: () => Promise<void>) {
     try {
-      setAssigningTicketId(ticketId);
-      await updateTicket(ticketId, { assignee });
+      setUpdatingRowId(ticketId);
+      setRowActionMessage((prev) => ({ ...prev, [ticketId]: message }));
+
+      await action();
       await fetchTickets();
     } catch (e: any) {
-      alert(e?.message || "Failed to assign ticket");
+      alert(e?.message || "Ticket update failed");
     } finally {
-      setAssigningTicketId(null);
+      setUpdatingRowId(null);
+      setRowActionMessage((prev) => {
+        const next = { ...prev };
+        delete next[ticketId];
+        return next;
+      });
     }
+  }
+
+  async function assignTicket(ticketId: number, assignee: string) {
+    await runRowAction(ticketId, "Updating assignee...", async () => {
+      await updateTicket(ticketId, { assignee });
+    });
   }
 
   async function toggleTicketStatus(ticket: Ticket) {
     const nextStatus = ticket.status === "closed" ? "open" : "closed";
+    const actionText = nextStatus === "closed" ? "Closing ticket..." : "Reopening ticket...";
 
-    try {
-      setStatusUpdatingTicketId(ticket.id);
+    await runRowAction(ticket.id, actionText, async () => {
       await updateTicket(ticket.id, { status: nextStatus });
-      await fetchTickets();
-    } catch (e: any) {
-      alert(e?.message || "Failed to update ticket status");
-    } finally {
-      setStatusUpdatingTicketId(null);
-    }
+    });
   }
 
   useEffect(() => {
@@ -678,11 +686,17 @@ export default function InboxPage() {
                 <tbody>
                   {tickets.map((t) => {
                     const slaText = formatSla(t.due_at);
-                    const isAssigning = assigningTicketId === t.id;
-                    const isUpdatingStatus = statusUpdatingTicketId === t.id;
+                    const isRowUpdating = updatingRowId === t.id;
+                    const rowMessage = rowActionMessage[t.id];
 
                     return (
-                      <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                      <tr
+                        key={t.id}
+                        style={{
+                          borderTop: "1px solid rgba(255,255,255,0.08)",
+                          opacity: isRowUpdating ? 0.82 : 1,
+                        }}
+                      >
                         <td style={{ padding: "12px 14px" }}>
                           <div style={{ fontWeight: 900, fontSize: 14 }}>
                             <a href={`/inbox/${t.id}`} style={{ color: "white", textDecoration: "none" }}>
@@ -692,23 +706,28 @@ export default function InboxPage() {
                           <div style={{ fontSize: 12, opacity: 0.7, marginTop: 3 }}>
                             {t.assignee ? `Assigned to ${t.assignee}` : "Unassigned"}
                           </div>
+                          {isRowUpdating && rowMessage && (
+                            <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>
+                              {rowMessage}
+                            </div>
+                          )}
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
                           <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
                             <span style={pillStyle("status", t.status)}>{t.status}</span>
                             <button
-                              disabled={isUpdatingStatus}
+                              disabled={isRowUpdating}
                               onClick={() => {
                                 void toggleTicketStatus(t);
                               }}
                               style={{
                                 ...miniActionBtn(),
-                                opacity: isUpdatingStatus ? 0.65 : 1,
-                                cursor: isUpdatingStatus ? "wait" : "pointer",
+                                opacity: isRowUpdating ? 0.65 : 1,
+                                cursor: isRowUpdating ? "wait" : "pointer",
                               }}
                             >
-                              {isUpdatingStatus
+                              {isRowUpdating
                                 ? "Updating..."
                                 : t.status === "closed"
                                 ? "Reopen"
@@ -726,30 +745,25 @@ export default function InboxPage() {
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <div style={{ display: "grid", gap: 6 }}>
-                            <select
-                              value={t.assignee ?? ""}
-                              disabled={isAssigning}
-                              onChange={(e) => {
-                                void assignTicket(t.id, e.target.value);
-                              }}
-                              style={{
-                                ...rowSelectStyle(),
-                                opacity: isAssigning ? 0.65 : 1,
-                                cursor: isAssigning ? "wait" : "pointer",
-                              }}
-                            >
-                              <option value="">Unassigned</option>
-                              {assignees.map((name) => (
-                                <option key={name} value={name}>
-                                  {name}
-                                </option>
-                              ))}
-                            </select>
-                            {isAssigning && (
-                              <span style={{ fontSize: 11, opacity: 0.7 }}>Updating assignee...</span>
-                            )}
-                          </div>
+                          <select
+                            value={t.assignee ?? ""}
+                            disabled={isRowUpdating}
+                            onChange={(e) => {
+                              void assignTicket(t.id, e.target.value);
+                            }}
+                            style={{
+                              ...rowSelectStyle(),
+                              opacity: isRowUpdating ? 0.65 : 1,
+                              cursor: isRowUpdating ? "wait" : "pointer",
+                            }}
+                          >
+                            <option value="">Unassigned</option>
+                            {assignees.map((name) => (
+                              <option key={name} value={name}>
+                                {name}
+                              </option>
+                            ))}
+                          </select>
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>

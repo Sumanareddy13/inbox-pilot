@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -184,12 +184,18 @@ export default function InboxPage() {
   const [statusUpdatingTicketId, setStatusUpdatingTicketId] = useState<number | null>(null);
 
   const assignees = useMemo(() => getAssignees(), []);
+  const searchInitRef = useRef(false);
 
   const limit = Math.min(Math.max(parseInt(sp.get("limit") || "20", 10), 1), 200);
   const offset = Math.max(parseInt(sp.get("offset") || "0", 10), 0);
   const sortBy = sp.get("sort_by") || "created_at";
   const order = sp.get("order") || "desc";
   const q = sp.get("q") || "";
+
+  const activeStatus = sp.get("status");
+  const activePriority = sp.get("priority");
+  const activeCategory = sp.get("category");
+  const activeOverdue = sp.get("overdue");
 
   const filters = useMemo(() => {
     const qs = new URLSearchParams();
@@ -227,6 +233,25 @@ export default function InboxPage() {
   useEffect(() => {
     setSearchInput(sp.get("q") || "");
   }, [sp]);
+
+  useEffect(() => {
+    if (!searchInitRef.current) {
+      searchInitRef.current = true;
+      return;
+    }
+
+    const trimmed = searchInput.trim();
+    if (trimmed === q) return;
+
+    const timeout = window.setTimeout(() => {
+      setQS({
+        q: trimmed || null,
+        offset: "0",
+      });
+    }, 450);
+
+    return () => window.clearTimeout(timeout);
+  }, [searchInput, q]);
 
   useEffect(() => {
     (async () => {
@@ -397,6 +422,39 @@ export default function InboxPage() {
   const canPrev = offset > 0;
   const canNext = offset + tickets.length < total;
 
+  const filterButtons = [
+    {
+      label: "All",
+      isActive: !activeStatus && !activePriority && !activeCategory && !activeOverdue,
+      qs: { status: null, priority: null, category: null, overdue: null, offset: "0" },
+    },
+    {
+      label: "Open",
+      isActive: activeStatus === "open" && !activePriority && !activeCategory && !activeOverdue,
+      qs: { status: "open", priority: null, category: null, overdue: null, offset: "0" },
+    },
+    {
+      label: "High Priority",
+      isActive: activePriority === "high" && !activeStatus && !activeCategory && !activeOverdue,
+      qs: { priority: "high", status: null, category: null, overdue: null, offset: "0" },
+    },
+    {
+      label: "Billing",
+      isActive: activeCategory === "billing" && !activeStatus && !activePriority && !activeOverdue,
+      qs: { category: "billing", status: null, priority: null, overdue: null, offset: "0" },
+    },
+    {
+      label: "Login",
+      isActive: activeCategory === "login" && !activeStatus && !activePriority && !activeOverdue,
+      qs: { category: "login", status: null, priority: null, overdue: null, offset: "0" },
+    },
+    {
+      label: "Overdue",
+      isActive: activeOverdue === "true" && !activeStatus && !activePriority && !activeCategory,
+      qs: { overdue: "true", status: null, priority: null, category: null, offset: "0" },
+    },
+  ];
+
   if (!sessionChecked) {
     return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
   }
@@ -463,12 +521,9 @@ export default function InboxPage() {
               outline: "none",
             }}
           />
-          <button
-            onClick={() => setQS({ q: searchInput.trim() || null, offset: "0" })}
-            style={actionBtn()}
-          >
-            Search
-          </button>
+          <div style={{ fontSize: 12, opacity: 0.72 }}>
+            {searchInput.trim() !== q ? "Typing..." : q ? `Searching: "${q}"` : "Search is live"}
+          </div>
           <button
             onClick={() => {
               setSearchInput("");
@@ -481,27 +536,11 @@ export default function InboxPage() {
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
-          {[
-            { label: "All", qs: { status: null, priority: null, category: null, overdue: null, offset: "0" } },
-            { label: "Open", qs: { status: "open", offset: "0" } },
-            { label: "High Priority", qs: { priority: "high", offset: "0" } },
-            { label: "Billing", qs: { category: "billing", offset: "0" } },
-            { label: "Login", qs: { category: "login", offset: "0" } },
-            { label: "Overdue", qs: { overdue: "true", offset: "0" } },
-          ].map((b) => (
+          {filterButtons.map((b) => (
             <button
               key={b.label}
               onClick={() => setQS(b.qs)}
-              style={{
-                padding: "7px 12px",
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.06)",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: 700,
-                fontSize: 12,
-              }}
+              style={filterBtn(b.isActive)}
             >
               {b.label}
             </button>
@@ -861,6 +900,20 @@ function rowSelectStyle(): React.CSSProperties {
     background: "rgba(255,255,255,0.06)",
     color: "white",
     minWidth: 140,
+  };
+}
+
+function filterBtn(active: boolean): React.CSSProperties {
+  return {
+    padding: "7px 12px",
+    borderRadius: 999,
+    border: active ? "1px solid rgba(59,130,246,0.55)" : "1px solid rgba(255,255,255,0.16)",
+    background: active ? "rgba(59,130,246,0.20)" : "rgba(255,255,255,0.06)",
+    color: "white",
+    cursor: "pointer",
+    fontWeight: 800,
+    fontSize: 12,
+    boxShadow: active ? "0 0 0 1px rgba(59,130,246,0.12) inset" : "none",
   };
 }
 

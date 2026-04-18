@@ -35,8 +35,21 @@ function formatDateShort(iso: string) {
   });
 }
 
-function formatSla(dueAt: string | null) {
+function getSlaState(dueAt: string | null, status: string): "none" | "safe" | "warning" | "overdue" {
+  if (!dueAt || status === "closed") return "none";
+
+  const due = new Date(dueAt).getTime();
+  const now = Date.now();
+  const diffMs = due - now;
+
+  if (diffMs < 0) return "overdue";
+  if (diffMs <= 6 * 60 * 60 * 1000) return "warning";
+  return "safe";
+}
+
+function formatSla(dueAt: string | null, status: string) {
   if (!dueAt) return "No SLA";
+  if (status === "closed") return "Closed";
 
   const due = new Date(dueAt).getTime();
   const now = Date.now();
@@ -110,18 +123,25 @@ function pillStyle(kind: "status" | "priority" | "category" | "sla", value: stri
   }
 
   if (kind === "sla") {
+    if (value === "Closed") {
+      return {
+        ...base,
+        borderColor: "rgba(148,163,184,0.28)",
+        background: "rgba(148,163,184,0.10)",
+      };
+    }
     if (value.toLowerCase().startsWith("overdue")) {
       return {
         ...base,
-        borderColor: "rgba(239,68,68,0.35)",
-        background: "rgba(239,68,68,0.10)",
+        borderColor: "rgba(239,68,68,0.50)",
+        background: "rgba(239,68,68,0.16)",
       };
     }
     if (value.toLowerCase().startsWith("due")) {
       return {
         ...base,
-        borderColor: "rgba(245,158,11,0.35)",
-        background: "rgba(245,158,11,0.10)",
+        borderColor: "rgba(245,158,11,0.42)",
+        background: "rgba(245,158,11,0.14)",
       };
     }
     return {
@@ -416,11 +436,7 @@ export default function InboxPage() {
     const open = tickets.filter((t) => t.status === "open").length;
     const closed = tickets.filter((t) => t.status === "closed").length;
     const high = tickets.filter((t) => t.priority === "high").length;
-    const overdue = tickets.filter((t) => {
-      if (!t.due_at) return false;
-      if (t.status === "closed") return false;
-      return new Date(t.due_at).getTime() < Date.now();
-    }).length;
+    const overdue = tickets.filter((t) => getSlaState(t.due_at, t.status) === "overdue").length;
 
     return { totalCount, open, closed, overdue, high };
   }, [tickets]);
@@ -545,11 +561,7 @@ export default function InboxPage() {
 
         <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
           {filterButtons.map((b) => (
-            <button
-              key={b.label}
-              onClick={() => setQS(b.qs)}
-              style={filterBtn(b.isActive)}
-            >
+            <button key={b.label} onClick={() => setQS(b.qs)} style={filterBtn(b.isActive)}>
               {b.label}
             </button>
           ))}
@@ -649,7 +661,7 @@ export default function InboxPage() {
           <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
             <div style={{ fontWeight: 900 }}>Tickets</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-              Tip: search works on subject text. Overdue is based on due_at + status != closed.
+              Tip: urgent SLA and unassigned tickets are highlighted to speed up triage.
             </div>
           </div>
 
@@ -685,9 +697,12 @@ export default function InboxPage() {
 
                 <tbody>
                   {tickets.map((t) => {
-                    const slaText = formatSla(t.due_at);
+                    const slaText = formatSla(t.due_at, t.status);
+                    const slaState = getSlaState(t.due_at, t.status);
                     const isRowUpdating = updatingRowId === t.id;
                     const rowMessage = rowActionMessage[t.id];
+                    const isUnassignedOpen = t.status === "open" && !t.assignee;
+                    const isOverdue = slaState === "overdue";
 
                     return (
                       <tr
@@ -695,17 +710,40 @@ export default function InboxPage() {
                         style={{
                           borderTop: "1px solid rgba(255,255,255,0.08)",
                           opacity: isRowUpdating ? 0.82 : 1,
+                          background: isOverdue
+                            ? "rgba(239,68,68,0.08)"
+                            : isUnassignedOpen
+                            ? "rgba(245,158,11,0.08)"
+                            : "transparent",
                         }}
                       >
                         <td style={{ padding: "12px 14px" }}>
-                          <div style={{ fontWeight: 900, fontSize: 14 }}>
-                            <a href={`/inbox/${t.id}`} style={{ color: "white", textDecoration: "none" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <a
+                              href={`/inbox/${t.id}`}
+                              style={{
+                                color: "white",
+                                textDecoration: "none",
+                                fontWeight: 900,
+                                fontSize: 14,
+                              }}
+                            >
                               #{t.id} — {t.subject}
                             </a>
+
+                            {isOverdue && (
+                              <span style={flagStyle("danger")}>Overdue</span>
+                            )}
+
+                            {isUnassignedOpen && (
+                              <span style={flagStyle("warning")}>Unassigned</span>
+                            )}
                           </div>
-                          <div style={{ fontSize: 12, opacity: 0.7, marginTop: 3 }}>
+
+                          <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
                             {t.assignee ? `Assigned to ${t.assignee}` : "Unassigned"}
                           </div>
+
                           {isRowUpdating && rowMessage && (
                             <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>
                               {rowMessage}
@@ -755,6 +793,9 @@ export default function InboxPage() {
                               ...rowSelectStyle(),
                               opacity: isRowUpdating ? 0.65 : 1,
                               cursor: isRowUpdating ? "wait" : "pointer",
+                              border: isUnassignedOpen
+                                ? "1px solid rgba(245,158,11,0.45)"
+                                : "1px solid rgba(255,255,255,0.16)",
                             }}
                           >
                             <option value="">Unassigned</option>
@@ -910,7 +951,6 @@ function rowSelectStyle(): React.CSSProperties {
   return {
     padding: "8px 10px",
     borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.16)",
     background: "rgba(255,255,255,0.06)",
     color: "white",
     minWidth: 140,
@@ -928,6 +968,34 @@ function filterBtn(active: boolean): React.CSSProperties {
     fontWeight: 800,
     fontSize: 12,
     boxShadow: active ? "0 0 0 1px rgba(59,130,246,0.12) inset" : "none",
+  };
+}
+
+function flagStyle(kind: "warning" | "danger"): React.CSSProperties {
+  if (kind === "danger") {
+    return {
+      display: "inline-flex",
+      alignItems: "center",
+      padding: "3px 8px",
+      borderRadius: 999,
+      fontSize: 11,
+      fontWeight: 800,
+      border: "1px solid rgba(239,68,68,0.45)",
+      background: "rgba(239,68,68,0.14)",
+      color: "white",
+    };
+  }
+
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "3px 8px",
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: 800,
+    border: "1px solid rgba(245,158,11,0.45)",
+    background: "rgba(245,158,11,0.14)",
+    color: "white",
   };
 }
 

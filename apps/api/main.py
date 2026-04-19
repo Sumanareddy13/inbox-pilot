@@ -24,6 +24,7 @@ ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
+ALLOWED_AI_STATUS = {"pending", "running", "complete", "failed"}
 
 ALLOWED_SORT_BY = {"created_at", "priority", "due_at", "status"}
 ALLOWED_ORDER = {"asc", "desc"}
@@ -160,6 +161,15 @@ class TicketOut(BaseModel):
     due_at: Optional[str]
     created_at: str
 
+    ai_category: Optional[str]
+    ai_priority: Optional[str]
+    ai_confidence: Optional[float]
+    ai_entities: Optional[str]
+    ai_status: str
+    ai_summary: Optional[str]
+    ai_last_error: Optional[str]
+    ai_updated_at: Optional[str]
+
 
 class MessageCreate(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
@@ -191,7 +201,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="0.7.0")
+app = FastAPI(title="Inbox Pilot API", version="0.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -217,6 +227,14 @@ def ticket_to_out(t: TicketModel) -> dict:
         "assignee": t.assignee,
         "due_at": t.due_at.isoformat() if t.due_at else None,
         "created_at": t.created_at.isoformat(),
+        "ai_category": t.ai_category,
+        "ai_priority": t.ai_priority,
+        "ai_confidence": float(t.ai_confidence) if t.ai_confidence is not None else None,
+        "ai_entities": t.ai_entities,
+        "ai_status": t.ai_status or "pending",
+        "ai_summary": t.ai_summary,
+        "ai_last_error": t.ai_last_error,
+        "ai_updated_at": t.ai_updated_at.isoformat() if t.ai_updated_at else None,
     }
 
 
@@ -229,6 +247,53 @@ def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Option
         meta_json=meta_json,
     )
     db.add(row)
+
+
+def run_stub_analysis(subject: str) -> dict:
+    text = subject.lower()
+
+    detected_category = "other"
+    detected_priority = "medium"
+    confidence = 0.72
+    entities: Dict[str, Any] = {"keywords": []}
+    summary = "Stub analysis completed. Replace this logic with async AI classification later."
+
+    if "login" in text or "password" in text or "signin" in text:
+        detected_category = "login"
+        detected_priority = "medium"
+        confidence = 0.84
+        entities["keywords"].append("login")
+        summary = "Detected likely login/access issue based on ticket subject."
+    elif "billing" in text or "payment" in text or "charged" in text or "invoice" in text:
+        detected_category = "billing"
+        detected_priority = "high"
+        confidence = 0.88
+        entities["keywords"].append("billing")
+        summary = "Detected likely billing/payment issue based on ticket subject."
+    elif "refund" in text or "return" in text:
+        detected_category = "refund"
+        detected_priority = "medium"
+        confidence = 0.82
+        entities["keywords"].append("refund")
+        summary = "Detected likely refund/return issue based on ticket subject."
+
+    if "urgent" in text or "asap" in text or "immediately" in text:
+        detected_priority = "high"
+        confidence = max(confidence, 0.9)
+        entities["keywords"].append("urgent")
+
+    entities["subject_length"] = len(subject)
+
+    return {
+        "ai_category": detected_category,
+        "ai_priority": detected_priority,
+        "ai_confidence": confidence,
+        "ai_entities": json.dumps(entities),
+        "ai_status": "complete",
+        "ai_summary": summary,
+        "ai_last_error": None,
+        "ai_updated_at": datetime.now(timezone.utc),
+    }
 
 
 @app.post("/tickets", response_model=TicketOut)
@@ -247,6 +312,7 @@ def create_ticket(
         status="open",
         priority=payload.priority,
         category=payload.category,
+        ai_status="pending",
     )
     db.add(ticket)
     db.commit()
@@ -439,6 +505,72 @@ def update_ticket(
     db.commit()
 
     return ticket_to_out(t)
+
+
+@app.post("/tickets/{ticket_id}/analyze", response_model=TicketOut)
+def analyze_ticket(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    t = db.get(TicketModel, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    t.ai_status = "running"
+    t.ai_last_error = None
+    t.ai_updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(t)
+
+    try:
+        result = run_stub_analysis(t.subject)
+
+        t.ai_category = result["ai_category"]
+        t.ai_priority = result["ai_priority"]
+        t.ai_confidence = result["ai_confidence"]
+        t.ai_entities = result["ai_entities"]
+        t.ai_status = result["ai_status"]
+        t.ai_summary = result["ai_summary"]
+        t.ai_last_error = result["ai_last_error"]
+        t.ai_updated_at = result["ai_updated_at"]
+
+        db.commit()
+        db.refresh(t)
+
+        log_event(
+            db=db,
+            ticket_id=int(t.id),
+            actor=actor_from_user(user),
+            action="ticket.ai_analyzed",
+            meta={
+                "ai_category": t.ai_category,
+                "ai_priority": t.ai_priority,
+                "ai_confidence": t.ai_confidence,
+                "ai_status": t.ai_status,
+            },
+        )
+        db.commit()
+
+        return ticket_to_out(t)
+
+    except Exception as e:
+        t.ai_status = "failed"
+        t.ai_last_error = str(e)
+        t.ai_updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(t)
+
+        log_event(
+            db=db,
+            ticket_id=int(t.id),
+            actor=actor_from_user(user),
+            action="ticket.ai_analysis_failed",
+            meta={"error": str(e)},
+        )
+        db.commit()
+
+        raise HTTPException(status_code=500, detail="AI analysis failed")
 
 
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)

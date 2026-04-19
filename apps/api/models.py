@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, Text, String, DateTime, func, ForeignKey
+from sqlalchemy import Column, BigInteger, Text, String, DateTime, Float, func, ForeignKey
 from sqlalchemy.orm import relationship
 
 from db import Base
@@ -17,7 +17,15 @@ class TicketModel(Base):
     assignee = Column(String, nullable=True)
     due_at = Column(DateTime(timezone=True), nullable=True)
 
-    # A ticket has many messages
+    ai_category = Column(String, nullable=True)
+    ai_priority = Column(String, nullable=True)
+    ai_confidence = Column(Float, nullable=True)
+    ai_entities = Column(Text, nullable=True)  # store JSON string for now
+    ai_status = Column(String, nullable=False, default="pending")
+    ai_summary = Column(Text, nullable=True)
+    ai_last_error = Column(Text, nullable=True)
+    ai_updated_at = Column(DateTime(timezone=True), nullable=True)
+
     messages = relationship(
         "MessageModel",
         back_populates="ticket",
@@ -25,7 +33,6 @@ class TicketModel(Base):
         passive_deletes=True,
     )
 
-    # A ticket has many audit logs
     audit_logs = relationship(
         "AuditLogModel",
         back_populates="ticket",
@@ -44,7 +51,6 @@ class MessageModel(Base):
         nullable=False,
         index=True,
     )
-
     sender_type = Column(String, nullable=False, default="customer")
     body = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -62,10 +68,9 @@ class AuditLogModel(Base):
         nullable=False,
         index=True,
     )
-
-    actor = Column(String, nullable=False)     # e.g. "agent:Sam"
-    action = Column(String, nullable=False)    # e.g. "ticket.created"
-    meta_json = Column(Text, nullable=True)    # JSON string (keep it simple)
+    actor = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    meta_json = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     ticket = relationship("TicketModel", back_populates="audit_logs")

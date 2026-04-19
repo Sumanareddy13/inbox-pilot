@@ -13,6 +13,15 @@ type Ticket = {
   assignee: string | null;
   due_at: string | null;
   created_at: string;
+
+  ai_category: string | null;
+  ai_priority: string | null;
+  ai_confidence: number | null;
+  ai_entities: string | null;
+  ai_status: string;
+  ai_summary: string | null;
+  ai_last_error: string | null;
+  ai_updated_at: string | null;
 };
 
 type Message = {
@@ -61,6 +70,22 @@ function formatSla(dueAt: string | null) {
   return `due in ${pretty}`;
 }
 
+function prettyConfidence(value: number | null) {
+  if (value === null || value === undefined) return "-";
+  return `${Math.round(value * 100)}%`;
+}
+
+function parseEntities(raw: string | null): string {
+  if (!raw) return "-";
+
+  try {
+    const parsed = JSON.parse(raw);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return raw;
+  }
+}
+
 export default function TicketPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -75,10 +100,10 @@ export default function TicketPage() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [runningAnalysis, setRunningAnalysis] = useState(false);
 
   const assignees = useMemo(() => getAssignees(), []);
 
-  // 1) Get session + token
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -94,7 +119,28 @@ export default function TicketPage() {
     })();
   }, [router]);
 
-  // 2) Fetch all data for this ticket
+  async function loadTicketData(token: string, id: string) {
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const [tRes, mRes, aRes] = await Promise.all([
+      fetch(`${API_BASE}/tickets/${id}`, { cache: "no-store", headers }),
+      fetch(`${API_BASE}/tickets/${id}/messages`, { cache: "no-store", headers }),
+      fetch(`${API_BASE}/tickets/${id}/audit`, { cache: "no-store", headers }),
+    ]);
+
+    if (!tRes.ok) throw new Error(`Ticket fetch failed: ${tRes.status} ${await tRes.text()}`);
+    if (!mRes.ok) throw new Error(`Messages fetch failed: ${mRes.status} ${await mRes.text()}`);
+    if (!aRes.ok) throw new Error(`Audit fetch failed: ${aRes.status} ${await aRes.text()}`);
+
+    const t = (await tRes.json()) as Ticket;
+    const m = (await mRes.json()) as Message[];
+    const a = (await aRes.json()) as AuditLog[];
+
+    setTicket(t);
+    setMessages(m);
+    setAudit(a);
+  }
+
   useEffect(() => {
     if (!sessionChecked) return;
     if (!accessToken) return;
@@ -104,26 +150,7 @@ export default function TicketPage() {
       try {
         setLoading(true);
         setErr(null);
-
-        const headers = { Authorization: `Bearer ${accessToken}` };
-
-        const [tRes, mRes, aRes] = await Promise.all([
-          fetch(`${API_BASE}/tickets/${ticketId}`, { cache: "no-store", headers }),
-          fetch(`${API_BASE}/tickets/${ticketId}/messages`, { cache: "no-store", headers }),
-          fetch(`${API_BASE}/tickets/${ticketId}/audit`, { cache: "no-store", headers }),
-        ]);
-
-        if (!tRes.ok) throw new Error(`Ticket fetch failed: ${tRes.status} ${await tRes.text()}`);
-        if (!mRes.ok) throw new Error(`Messages fetch failed: ${mRes.status} ${await mRes.text()}`);
-        if (!aRes.ok) throw new Error(`Audit fetch failed: ${aRes.status} ${await aRes.text()}`);
-
-        const t = (await tRes.json()) as Ticket;
-        const m = (await mRes.json()) as Message[];
-        const a = (await aRes.json()) as AuditLog[];
-
-        setTicket(t);
-        setMessages(m);
-        setAudit(a);
+        await loadTicketData(accessToken, ticketId);
       } catch (e: any) {
         setErr(e.message || "Failed to load ticket");
       } finally {
@@ -150,15 +177,33 @@ export default function TicketPage() {
       throw new Error(`${res.status} ${text}`);
     }
 
-    // refresh ticket + audit after patch
-    const headers = { Authorization: `Bearer ${accessToken}` };
-    const [tRes, aRes] = await Promise.all([
-      fetch(`${API_BASE}/tickets/${ticketId}`, { cache: "no-store", headers }),
-      fetch(`${API_BASE}/tickets/${ticketId}/audit`, { cache: "no-store", headers }),
-    ]);
+    await loadTicketData(accessToken, ticketId);
+  }
 
-    if (tRes.ok) setTicket((await tRes.json()) as Ticket);
-    if (aRes.ok) setAudit((await aRes.json()) as AuditLog[]);
+  async function runAnalysis() {
+    if (!accessToken || !ticketId) return;
+
+    try {
+      setRunningAnalysis(true);
+
+      const res = await fetch(`${API_BASE}/tickets/${ticketId}/analyze`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status} ${text}`);
+      }
+
+      await loadTicketData(accessToken, ticketId);
+    } catch (e: any) {
+      alert(e.message || "Analysis failed");
+    } finally {
+      setRunningAnalysis(false);
+    }
   }
 
   async function assignTicket(assignee: string) {
@@ -175,7 +220,7 @@ export default function TicketPage() {
   }
 
   async function clearSla() {
-    await apiPatch({ due_at: "" }); // your backend treats "" as clear
+    await apiPatch({ due_at: "" });
   }
 
   async function addMessage(body: string) {
@@ -196,15 +241,7 @@ export default function TicketPage() {
       throw new Error(`${res.status} ${text}`);
     }
 
-    // refresh messages + audit
-    const headers = { Authorization: `Bearer ${accessToken}` };
-    const [mRes, aRes] = await Promise.all([
-      fetch(`${API_BASE}/tickets/${ticketId}/messages`, { cache: "no-store", headers }),
-      fetch(`${API_BASE}/tickets/${ticketId}/audit`, { cache: "no-store", headers }),
-    ]);
-
-    if (mRes.ok) setMessages((await mRes.json()) as Message[]);
-    if (aRes.ok) setAudit((await aRes.json()) as AuditLog[]);
+    await loadTicketData(accessToken, ticketId);
   }
 
   if (!sessionChecked) {
@@ -238,7 +275,7 @@ export default function TicketPage() {
   }
 
   return (
-    <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 900 }}>
+    <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 980 }}>
       <a href="/inbox">← Back to Inbox</a>
 
       <h1 style={{ fontSize: 26, marginTop: 10 }}>{ticket.subject}</h1>
@@ -248,8 +285,7 @@ export default function TicketPage() {
           <b>Ticket:</b> #{ticket.id}
         </div>
         <div>
-          <b>Status:</b> {ticket.status} • <b>Priority:</b> {ticket.priority} •{" "}
-          <b>Category:</b> {ticket.category}
+          <b>Status:</b> {ticket.status} • <b>Priority:</b> {ticket.priority} • <b>Category:</b> {ticket.category}
         </div>
         <div>
           <b>Assignee:</b> {ticket.assignee ?? "-"}
@@ -259,7 +295,6 @@ export default function TicketPage() {
         </div>
       </div>
 
-      {/* Actions */}
       <section
         style={{
           marginTop: 16,
@@ -270,7 +305,6 @@ export default function TicketPage() {
       >
         <h2 style={{ fontSize: 16, marginBottom: 10 }}>Actions</h2>
 
-        {/* Assign */}
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <label htmlFor="assignee">
             <b>Assign:</b>
@@ -278,7 +312,7 @@ export default function TicketPage() {
 
           <select
             id="assignee"
-            defaultValue={ticket.assignee ?? assignees[0] ?? "Sumana"}
+            value={ticket.assignee ?? ""}
             style={{ padding: 8 }}
             onChange={async (e) => {
               const name = e.target.value;
@@ -289,6 +323,7 @@ export default function TicketPage() {
               }
             }}
           >
+            <option value="">Unassigned</option>
             {assignees.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -311,7 +346,6 @@ export default function TicketPage() {
           </button>
         </div>
 
-        {/* SLA Buttons */}
         <div style={{ marginTop: 12 }}>
           <b>Set SLA:</b>{" "}
           <button style={{ padding: "6px 10px", marginRight: 8 }} onClick={() => setSlaHours(4)}>
@@ -329,7 +363,72 @@ export default function TicketPage() {
         </div>
       </section>
 
-      {/* Messages */}
+      <section
+        style={{
+          marginTop: 18,
+          padding: 14,
+          border: "1px solid rgba(255,255,255,0.12)",
+          borderRadius: 10,
+          background: "rgba(255,255,255,0.03)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ fontSize: 18, margin: 0 }}>AI Analysis</h2>
+            <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
+              Stub pipeline for analysis workflow. Real async AI comes later.
+            </div>
+          </div>
+
+          <button
+            onClick={runAnalysis}
+            disabled={runningAnalysis}
+            style={{ padding: "8px 12px", fontWeight: 700 }}
+          >
+            {runningAnalysis ? "Analyzing..." : "Run AI Analysis"}
+          </button>
+        </div>
+
+        <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
+          <div>
+            <b>Status:</b> {ticket.ai_status || "pending"}
+          </div>
+          <div>
+            <b>Suggested Category:</b> {ticket.ai_category ?? "-"}
+          </div>
+          <div>
+            <b>Suggested Priority:</b> {ticket.ai_priority ?? "-"}
+          </div>
+          <div>
+            <b>Confidence:</b> {prettyConfidence(ticket.ai_confidence)}
+          </div>
+          <div>
+            <b>Summary:</b> {ticket.ai_summary ?? "-"}
+          </div>
+          <div>
+            <b>Last Updated:</b> {ticket.ai_updated_at ?? "-"}
+          </div>
+          <div>
+            <b>Last Error:</b> {ticket.ai_last_error ?? "-"}
+          </div>
+          <div>
+            <b>Entities:</b>
+            <pre
+              style={{
+                marginTop: 6,
+                padding: 10,
+                borderRadius: 8,
+                background: "rgba(255,255,255,0.06)",
+                overflowX: "auto",
+                fontSize: 12,
+              }}
+            >
+              {parseEntities(ticket.ai_entities)}
+            </pre>
+          </div>
+        </div>
+      </section>
+
       <h2 style={{ fontSize: 18, marginTop: 22 }}>Messages</h2>
 
       <MessageComposer
@@ -357,7 +456,6 @@ export default function TicketPage() {
         </ul>
       )}
 
-      {/* Activity */}
       <h2 style={{ fontSize: 18, marginTop: 22 }}>Activity</h2>
       {audit.length === 0 ? (
         <p>No activity yet.</p>

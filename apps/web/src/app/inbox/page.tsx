@@ -67,6 +67,17 @@ function formatSla(dueAt: string | null, status: string) {
   return `Due ${pretty}`;
 }
 
+function urgencyRank(ticket: Ticket) {
+  const slaState = getSlaState(ticket.due_at, ticket.status);
+  const isUnassignedOpen = ticket.status === "open" && !ticket.assignee;
+
+  if (slaState === "overdue") return 0;
+  if (isUnassignedOpen) return 1;
+  if (slaState === "warning") return 2;
+  if (ticket.status === "open") return 3;
+  return 4;
+}
+
 function pillStyle(kind: "status" | "priority" | "category" | "sla", value: string) {
   const base = {
     display: "inline-flex",
@@ -373,6 +384,20 @@ export default function InboxPage() {
     });
   }
 
+  async function setTicketSla(ticketId: number, hours: number) {
+    const due = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+
+    await runRowAction(ticketId, `Setting SLA to +${hours}h...`, async () => {
+      await updateTicket(ticketId, { due_at: due });
+    });
+  }
+
+  async function clearTicketSla(ticketId: number) {
+    await runRowAction(ticketId, "Clearing SLA...", async () => {
+      await updateTicket(ticketId, { due_at: "" });
+    });
+  }
+
   useEffect(() => {
     if (!sessionChecked) return;
     if (!accessToken) return;
@@ -441,8 +466,19 @@ export default function InboxPage() {
     return { totalCount, open, closed, overdue, high };
   }, [tickets]);
 
+  const displayedTickets = useMemo(() => {
+    return tickets
+      .map((ticket, index) => ({ ticket, index }))
+      .sort((a, b) => {
+        const rankDiff = urgencyRank(a.ticket) - urgencyRank(b.ticket);
+        if (rankDiff !== 0) return rankDiff;
+        return a.index - b.index;
+      })
+      .map((item) => item.ticket);
+  }, [tickets]);
+
   const from = total === 0 ? 0 : Math.min(offset + 1, total);
-  const to = total === 0 ? 0 : Math.min(offset + tickets.length, total);
+  const to = total === 0 ? 0 : Math.min(offset + displayedTickets.length, total);
   const canPrev = offset > 0;
   const canNext = offset + tickets.length < total;
 
@@ -661,7 +697,7 @@ export default function InboxPage() {
           <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
             <div style={{ fontWeight: 900 }}>Tickets</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-              Tip: urgent SLA and unassigned tickets are highlighted to speed up triage.
+              Tip: urgent tickets float to the top, and SLA can be adjusted directly from the inbox.
             </div>
           </div>
 
@@ -676,7 +712,7 @@ export default function InboxPage() {
                 </button>
               </div>
             </div>
-          ) : tickets.length === 0 ? (
+          ) : displayedTickets.length === 0 ? (
             <div style={{ padding: 16, opacity: 0.85 }}>
               {q ? `No tickets matched "${q}".` : "No tickets match these filters."}
             </div>
@@ -696,13 +732,14 @@ export default function InboxPage() {
                 </thead>
 
                 <tbody>
-                  {tickets.map((t) => {
+                  {displayedTickets.map((t) => {
                     const slaText = formatSla(t.due_at, t.status);
                     const slaState = getSlaState(t.due_at, t.status);
                     const isRowUpdating = updatingRowId === t.id;
                     const rowMessage = rowActionMessage[t.id];
                     const isUnassignedOpen = t.status === "open" && !t.assignee;
                     const isOverdue = slaState === "overdue";
+                    const isWarning = slaState === "warning";
 
                     return (
                       <tr
@@ -714,6 +751,8 @@ export default function InboxPage() {
                             ? "rgba(239,68,68,0.08)"
                             : isUnassignedOpen
                             ? "rgba(245,158,11,0.08)"
+                            : isWarning
+                            ? "rgba(245,158,11,0.05)"
                             : "transparent",
                         }}
                       >
@@ -731,13 +770,9 @@ export default function InboxPage() {
                               #{t.id} — {t.subject}
                             </a>
 
-                            {isOverdue && (
-                              <span style={flagStyle("danger")}>Overdue</span>
-                            )}
-
-                            {isUnassignedOpen && (
-                              <span style={flagStyle("warning")}>Unassigned</span>
-                            )}
+                            {isOverdue && <span style={flagStyle("danger")}>Overdue</span>}
+                            {isUnassignedOpen && <span style={flagStyle("warning")}>Unassigned</span>}
+                            {isWarning && !isOverdue && <span style={flagStyle("warning")}>Due Soon</span>}
                           </div>
 
                           <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
@@ -808,7 +843,41 @@ export default function InboxPage() {
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <span style={pillStyle("sla", slaText)}>{slaText}</span>
+                          <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
+                            <span style={pillStyle("sla", slaText)}>{slaText}</span>
+
+                            {t.status === "open" && (
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                <button
+                                  disabled={isRowUpdating}
+                                  onClick={() => {
+                                    void setTicketSla(t.id, 4);
+                                  }}
+                                  style={miniGhostBtn(isRowUpdating)}
+                                >
+                                  +4h
+                                </button>
+                                <button
+                                  disabled={isRowUpdating}
+                                  onClick={() => {
+                                    void setTicketSla(t.id, 24);
+                                  }}
+                                  style={miniGhostBtn(isRowUpdating)}
+                                >
+                                  +24h
+                                </button>
+                                <button
+                                  disabled={isRowUpdating || !t.due_at}
+                                  onClick={() => {
+                                    void clearTicketSla(t.id);
+                                  }}
+                                  style={miniGhostBtn(isRowUpdating || !t.due_at)}
+                                >
+                                  Clear
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </td>
 
                         <td style={{ padding: "12px 14px", opacity: 0.85 }}>
@@ -920,6 +989,20 @@ function miniActionBtn(): React.CSSProperties {
     color: "white",
     fontSize: 12,
     fontWeight: 700,
+  };
+}
+
+function miniGhostBtn(disabled: boolean): React.CSSProperties {
+  return {
+    padding: "5px 8px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: disabled ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.05)",
+    color: "white",
+    fontSize: 11,
+    fontWeight: 700,
+    opacity: disabled ? 0.5 : 1,
+    cursor: disabled ? "not-allowed" : "pointer",
   };
 }
 

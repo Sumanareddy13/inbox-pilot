@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc, asc, func
+from openai import OpenAI
 
 from db import SessionLocal
 from models import TicketModel, MessageModel, AuditLogModel
@@ -24,7 +25,6 @@ ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
-ALLOWED_AI_STATUS = {"pending", "running", "complete", "failed"}
 
 ALLOWED_SORT_BY = {"created_at", "priority", "due_at", "status"}
 ALLOWED_ORDER = {"asc", "desc"}
@@ -33,6 +33,11 @@ ALLOWED_ORDER = {"asc", "desc"}
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "").strip()
 if not SUPABASE_PROJECT_URL:
     raise RuntimeError("Missing SUPABASE_PROJECT_URL in apps/api/.env")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 JWKS_URL = f"{SUPABASE_PROJECT_URL}/auth/v1/.well-known/jwks.json"
 
@@ -201,7 +206,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="0.9.0")
+app = FastAPI(title="Inbox Pilot API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -249,48 +254,100 @@ def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Option
     db.add(row)
 
 
-def run_stub_analysis(subject: str) -> dict:
-    text = subject.lower()
+def run_openai_analysis(subject: str) -> dict:
+    if not openai_client:
+        raise RuntimeError("OPENAI_API_KEY is not set")
 
-    detected_category = "other"
-    detected_priority = "medium"
-    confidence = 0.72
-    entities: Dict[str, Any] = {"keywords": []}
-    summary = "Stub analysis completed. Replace this logic with async AI classification later."
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "category": {
+                "type": "string",
+                "enum": ["billing", "login", "refund", "other"],
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+            },
+            "summary": {
+                "type": "string",
+            },
+            "entities": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "customer_email": {"type": ["string", "null"]},
+                    "order_id": {"type": ["string", "null"]},
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "needs_human_review": {"type": "boolean"},
+                },
+                "required": [
+                    "customer_email",
+                    "order_id",
+                    "keywords",
+                    "needs_human_review",
+                ],
+            },
+        },
+        "required": [
+            "category",
+            "priority",
+            "confidence",
+            "summary",
+            "entities",
+        ],
+    }
 
-    if "login" in text or "password" in text or "signin" in text:
-        detected_category = "login"
-        detected_priority = "medium"
-        confidence = 0.84
-        entities["keywords"].append("login")
-        summary = "Detected likely login/access issue based on ticket subject."
-    elif "billing" in text or "payment" in text or "charged" in text or "invoice" in text:
-        detected_category = "billing"
-        detected_priority = "high"
-        confidence = 0.88
-        entities["keywords"].append("billing")
-        summary = "Detected likely billing/payment issue based on ticket subject."
-    elif "refund" in text or "return" in text:
-        detected_category = "refund"
-        detected_priority = "medium"
-        confidence = 0.82
-        entities["keywords"].append("refund")
-        summary = "Detected likely refund/return issue based on ticket subject."
+    prompt = f"""
+You are an internal support triage assistant for Inbox Pilot.
 
-    if "urgent" in text or "asap" in text or "immediately" in text:
-        detected_priority = "high"
-        confidence = max(confidence, 0.9)
-        entities["keywords"].append("urgent")
+Analyze the ticket subject and return structured triage data.
 
-    entities["subject_length"] = len(subject)
+Rules:
+- category must be one of: billing, login, refund, other.
+- priority must be one of: low, medium, high.
+- confidence must be between 0 and 1.
+- Extract customer_email and order_id only if explicitly present.
+- keywords should be short operational keywords from the ticket.
+- needs_human_review should be true if the issue sounds urgent, risky, unclear, financial, account-access related, or customer-impacting.
+- Keep summary concise and useful for a support agent.
+
+Ticket subject:
+{subject}
+""".strip()
+
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        input=prompt,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "ticket_triage_analysis",
+                "schema": schema,
+                "strict": True,
+            }
+        },
+        timeout=20,
+    )
+
+    parsed = json.loads(response.output_text)
 
     return {
-        "ai_category": detected_category,
-        "ai_priority": detected_priority,
-        "ai_confidence": confidence,
-        "ai_entities": json.dumps(entities),
+        "ai_category": parsed["category"],
+        "ai_priority": parsed["priority"],
+        "ai_confidence": float(parsed["confidence"]),
+        "ai_entities": json.dumps(parsed["entities"]),
         "ai_status": "complete",
-        "ai_summary": summary,
+        "ai_summary": parsed["summary"],
         "ai_last_error": None,
         "ai_updated_at": datetime.now(timezone.utc),
     }
@@ -303,9 +360,9 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
         if not ticket:
             return
 
-        time.sleep(2.5)
+        time.sleep(1.5)
 
-        result = run_stub_analysis(ticket.subject)
+        result = run_openai_analysis(ticket.subject)
 
         ticket.ai_category = result["ai_category"]
         ticket.ai_priority = result["ai_priority"]
@@ -329,6 +386,8 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
                 "ai_priority": ticket.ai_priority,
                 "ai_confidence": ticket.ai_confidence,
                 "ai_status": ticket.ai_status,
+                "ai_source": "openai",
+                "model": OPENAI_MODEL,
             },
         )
         db.commit()
@@ -347,7 +406,11 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
                 ticket_id=int(ticket.id),
                 actor=actor,
                 action="ticket.ai_analysis_failed",
-                meta={"error": str(e)},
+                meta={
+                    "error": str(e),
+                    "ai_source": "openai",
+                    "model": OPENAI_MODEL,
+                },
             )
             db.commit()
     finally:
@@ -539,10 +602,12 @@ def update_ticket(
             except Exception:
                 raise HTTPException(
                     status_code=400,
-                    detail="due_at must be ISO format like 2026-01-20T10:00:00+00:00 (or empty string to clear)",
+                    detail="due_at must be ISO format like 2026-01-20T10:00:00+00:00 or empty string to clear",
                 )
+
         old_due = t.due_at.isoformat() if t.due_at else None
         new_due_str = new_due.isoformat() if new_due else None
+
         if new_due_str != old_due:
             changed_fields["due_at"] = {"from": old_due, "to": new_due_str}
             t.due_at = new_due
@@ -591,19 +656,25 @@ def analyze_ticket(
     db.commit()
     db.refresh(t)
 
+    actor = actor_from_user(user)
+
     log_event(
         db=db,
         ticket_id=int(t.id),
-        actor=actor_from_user(user),
+        actor=actor,
         action="ticket.ai_analysis_started",
-        meta={"ai_status": "running"},
+        meta={
+            "ai_status": "running",
+            "ai_source": "openai",
+            "model": OPENAI_MODEL,
+        },
     )
     db.commit()
 
     background_tasks.add_task(
         process_ticket_analysis_async,
         int(t.id),
-        actor_from_user(user),
+        actor,
     )
 
     return ticket_to_out(t)

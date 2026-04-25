@@ -10,7 +10,7 @@ import jwt
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Response
+from fastapi import FastAPI, HTTPException, Depends, Header, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -201,7 +201,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="0.8.0")
+app = FastAPI(title="Inbox Pilot API", version="0.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -294,6 +294,64 @@ def run_stub_analysis(subject: str) -> dict:
         "ai_last_error": None,
         "ai_updated_at": datetime.now(timezone.utc),
     }
+
+
+def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
+    db = SessionLocal()
+    try:
+        ticket = db.get(TicketModel, ticket_id)
+        if not ticket:
+            return
+
+        time.sleep(2.5)
+
+        result = run_stub_analysis(ticket.subject)
+
+        ticket.ai_category = result["ai_category"]
+        ticket.ai_priority = result["ai_priority"]
+        ticket.ai_confidence = result["ai_confidence"]
+        ticket.ai_entities = result["ai_entities"]
+        ticket.ai_status = result["ai_status"]
+        ticket.ai_summary = result["ai_summary"]
+        ticket.ai_last_error = result["ai_last_error"]
+        ticket.ai_updated_at = result["ai_updated_at"]
+
+        db.commit()
+        db.refresh(ticket)
+
+        log_event(
+            db=db,
+            ticket_id=int(ticket.id),
+            actor=actor,
+            action="ticket.ai_analyzed",
+            meta={
+                "ai_category": ticket.ai_category,
+                "ai_priority": ticket.ai_priority,
+                "ai_confidence": ticket.ai_confidence,
+                "ai_status": ticket.ai_status,
+            },
+        )
+        db.commit()
+
+    except Exception as e:
+        ticket = db.get(TicketModel, ticket_id)
+        if ticket:
+            ticket.ai_status = "failed"
+            ticket.ai_last_error = str(e)
+            ticket.ai_updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(ticket)
+
+            log_event(
+                db=db,
+                ticket_id=int(ticket.id),
+                actor=actor,
+                action="ticket.ai_analysis_failed",
+                meta={"error": str(e)},
+            )
+            db.commit()
+    finally:
+        db.close()
 
 
 @app.post("/tickets", response_model=TicketOut)
@@ -510,6 +568,7 @@ def update_ticket(
 @app.post("/tickets/{ticket_id}/analyze", response_model=TicketOut)
 def analyze_ticket(
     ticket_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
@@ -517,60 +576,37 @@ def analyze_ticket(
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    if t.ai_status == "running":
+        return ticket_to_out(t)
+
     t.ai_status = "running"
     t.ai_last_error = None
     t.ai_updated_at = datetime.now(timezone.utc)
+    t.ai_category = None
+    t.ai_priority = None
+    t.ai_confidence = None
+    t.ai_entities = None
+    t.ai_summary = None
+
     db.commit()
     db.refresh(t)
 
-    try:
-        result = run_stub_analysis(t.subject)
+    log_event(
+        db=db,
+        ticket_id=int(t.id),
+        actor=actor_from_user(user),
+        action="ticket.ai_analysis_started",
+        meta={"ai_status": "running"},
+    )
+    db.commit()
 
-        t.ai_category = result["ai_category"]
-        t.ai_priority = result["ai_priority"]
-        t.ai_confidence = result["ai_confidence"]
-        t.ai_entities = result["ai_entities"]
-        t.ai_status = result["ai_status"]
-        t.ai_summary = result["ai_summary"]
-        t.ai_last_error = result["ai_last_error"]
-        t.ai_updated_at = result["ai_updated_at"]
+    background_tasks.add_task(
+        process_ticket_analysis_async,
+        int(t.id),
+        actor_from_user(user),
+    )
 
-        db.commit()
-        db.refresh(t)
-
-        log_event(
-            db=db,
-            ticket_id=int(t.id),
-            actor=actor_from_user(user),
-            action="ticket.ai_analyzed",
-            meta={
-                "ai_category": t.ai_category,
-                "ai_priority": t.ai_priority,
-                "ai_confidence": t.ai_confidence,
-                "ai_status": t.ai_status,
-            },
-        )
-        db.commit()
-
-        return ticket_to_out(t)
-
-    except Exception as e:
-        t.ai_status = "failed"
-        t.ai_last_error = str(e)
-        t.ai_updated_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(t)
-
-        log_event(
-            db=db,
-            ticket_id=int(t.id),
-            actor=actor_from_user(user),
-            action="ticket.ai_analysis_failed",
-            meta={"error": str(e)},
-        )
-        db.commit()
-
-        raise HTTPException(status_code=500, detail="AI analysis failed")
+    return ticket_to_out(t)
 
 
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)

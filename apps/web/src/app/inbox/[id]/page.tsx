@@ -86,6 +86,45 @@ function parseEntities(raw: string | null): string {
   }
 }
 
+function aiStatusStyle(status: string): React.CSSProperties {
+  const base: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.06)",
+    fontSize: 12,
+    fontWeight: 700,
+  };
+
+  if (status === "running") {
+    return {
+      ...base,
+      border: "1px solid rgba(245,158,11,0.45)",
+      background: "rgba(245,158,11,0.14)",
+    };
+  }
+
+  if (status === "complete") {
+    return {
+      ...base,
+      border: "1px solid rgba(34,197,94,0.4)",
+      background: "rgba(34,197,94,0.12)",
+    };
+  }
+
+  if (status === "failed") {
+    return {
+      ...base,
+      border: "1px solid rgba(239,68,68,0.45)",
+      background: "rgba(239,68,68,0.14)",
+    };
+  }
+
+  return base;
+}
+
 export default function TicketPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -159,6 +198,25 @@ export default function TicketPage() {
     })();
   }, [sessionChecked, accessToken, ticketId]);
 
+  useEffect(() => {
+    if (!accessToken || !ticketId || !ticket) return;
+    if (ticket.ai_status !== "running") return;
+
+    const interval = window.setInterval(() => {
+      void loadTicketData(accessToken, ticketId);
+    }, 1500);
+
+    return () => window.clearInterval(interval);
+  }, [accessToken, ticketId, ticket]);
+
+  useEffect(() => {
+    if (ticket?.ai_status === "running") {
+      setRunningAnalysis(true);
+    } else {
+      setRunningAnalysis(false);
+    }
+  }, [ticket?.ai_status]);
+
   async function apiPatch(body: any) {
     if (!accessToken || !ticketId) return;
 
@@ -200,9 +258,8 @@ export default function TicketPage() {
 
       await loadTicketData(accessToken, ticketId);
     } catch (e: any) {
-      alert(e.message || "Analysis failed");
-    } finally {
       setRunningAnalysis(false);
+      alert(e.message || "Analysis failed");
     }
   }
 
@@ -376,7 +433,7 @@ export default function TicketPage() {
           <div>
             <h2 style={{ fontSize: 18, margin: 0 }}>AI Analysis</h2>
             <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
-              Stub pipeline for analysis workflow. Real async AI comes later.
+              Analysis now runs asynchronously and auto-refreshes while processing.
             </div>
           </div>
 
@@ -385,14 +442,24 @@ export default function TicketPage() {
             disabled={runningAnalysis}
             style={{ padding: "8px 12px", fontWeight: 700 }}
           >
-            {runningAnalysis ? "Analyzing..." : "Run AI Analysis"}
+            {runningAnalysis ? "Analysis Running..." : "Run AI Analysis"}
           </button>
         </div>
 
         <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
           <div>
-            <b>Status:</b> {ticket.ai_status || "pending"}
+            <b>Status:</b>{" "}
+            <span style={aiStatusStyle(ticket.ai_status || "pending")}>
+              {ticket.ai_status || "pending"}
+            </span>
           </div>
+
+          {ticket.ai_status === "running" && (
+            <div style={{ fontSize: 13, opacity: 0.82 }}>
+              Analysis is in progress. This page refreshes automatically until the result is ready.
+            </div>
+          )}
+
           <div>
             <b>Suggested Category:</b> {ticket.ai_category ?? "-"}
           </div>

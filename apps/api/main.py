@@ -66,10 +66,11 @@ def _verify_supabase_jwt(token: str) -> dict:
 
     kid = header.get("kid")
     if not kid:
-        raise HTTPException(status_code=401, detail="Invalid auth token (missing kid)")
+        raise HTTPException(status_code=401, detail="Invalid auth token missing kid")
 
     jwks = _get_jwks()
     key = None
+
     for k in jwks.get("keys", []):
         if k.get("kid") == kid:
             key = k
@@ -78,13 +79,14 @@ def _verify_supabase_jwt(token: str) -> dict:
     if not key:
         _JWKS_CACHE["keys"] = None
         jwks = _get_jwks()
+
         for k in jwks.get("keys", []):
             if k.get("kid") == kid:
                 key = k
                 break
 
     if not key:
-        raise HTTPException(status_code=401, detail="Auth key not found (kid mismatch)")
+        raise HTTPException(status_code=401, detail="Auth key not found kid mismatch")
 
     try:
         alg = header.get("alg")
@@ -124,6 +126,7 @@ def _verify_supabase_jwt(token: str) -> dict:
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
+
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail=f"Bad Authorization format: {authorization[:30]}")
 
@@ -138,6 +141,7 @@ def actor_from_user(user: dict) -> str:
     email = user.get("email")
     if email:
         return f"agent:{email}"
+
     sub = user.get("sub") or "unknown"
     return f"agent:{sub}"
 
@@ -198,6 +202,21 @@ class AuditLogOut(BaseModel):
     created_at: str
 
 
+class AiEntities(BaseModel):
+    customer_email: Optional[str]
+    order_id: Optional[str]
+    keywords: List[str]
+    needs_human_review: bool
+
+
+class AiAnalysisResult(BaseModel):
+    category: str
+    priority: str
+    confidence: float
+    summary: str
+    entities: AiEntities
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -206,7 +225,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="1.0.0")
+app = FastAPI(title="Inbox Pilot API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -245,6 +264,7 @@ def ticket_to_out(t: TicketModel) -> dict:
 
 def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
     meta_json = json.dumps(meta) if meta is not None else None
+
     row = AuditLogModel(
         ticket_id=ticket_id,
         actor=actor,
@@ -252,6 +272,73 @@ def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Option
         meta_json=meta_json,
     )
     db.add(row)
+
+
+def fallback_ai_result(reason: str) -> dict:
+    return {
+        "ai_category": "other",
+        "ai_priority": "medium",
+        "ai_confidence": 0.3,
+        "ai_entities": json.dumps(
+            {
+                "customer_email": None,
+                "order_id": None,
+                "keywords": [],
+                "needs_human_review": True,
+            }
+        ),
+        "ai_status": "complete",
+        "ai_summary": "AI analysis completed with fallback values because the response could not be safely validated.",
+        "ai_last_error": f"Fallback used: {reason}",
+        "ai_updated_at": datetime.now(timezone.utc),
+        "used_fallback": True,
+    }
+
+
+def normalize_ai_result(raw: dict) -> dict:
+    try:
+        parsed = AiAnalysisResult.model_validate(raw)
+
+        category = parsed.category if parsed.category in ALLOWED_CATEGORY else "other"
+        priority = parsed.priority if parsed.priority in ALLOWED_PRIORITY else "medium"
+
+        confidence = parsed.confidence
+        if confidence < 0:
+            confidence = 0
+        if confidence > 1:
+            confidence = 1
+
+        summary = parsed.summary.strip()
+        if not summary:
+            summary = "AI analysis completed, but no useful summary was returned."
+
+        keywords = [
+            str(k).strip().lower()
+            for k in parsed.entities.keywords
+            if str(k).strip()
+        ]
+
+        entities = {
+            "customer_email": parsed.entities.customer_email,
+            "order_id": parsed.entities.order_id,
+            "keywords": keywords[:8],
+            "needs_human_review": parsed.entities.needs_human_review,
+        }
+
+        return {
+            "ai_category": category,
+            "ai_priority": priority,
+            "ai_confidence": float(confidence),
+            "ai_entities": json.dumps(entities),
+            "ai_status": "complete",
+            "ai_summary": summary,
+            "ai_last_error": None,
+            "ai_updated_at": datetime.now(timezone.utc),
+            "used_fallback": False,
+        }
+
+    except Exception as e:
+        return fallback_ai_result(str(e))
 
 
 def run_openai_analysis(subject: str) -> dict:
@@ -310,16 +397,17 @@ def run_openai_analysis(subject: str) -> dict:
     prompt = f"""
 You are an internal support triage assistant for Inbox Pilot.
 
-Analyze the ticket subject and return structured triage data.
+Analyze the support ticket subject and return structured triage data for an agent.
 
-Rules:
+Business rules:
 - category must be one of: billing, login, refund, other.
 - priority must be one of: low, medium, high.
 - confidence must be between 0 and 1.
-- Extract customer_email and order_id only if explicitly present.
-- keywords should be short operational keywords from the ticket.
-- needs_human_review should be true if the issue sounds urgent, risky, unclear, financial, account-access related, or customer-impacting.
-- Keep summary concise and useful for a support agent.
+- Extract customer_email only if an email address is explicitly present.
+- Extract order_id only if an order or transaction identifier is explicitly present.
+- keywords should be short operational keywords, not full sentences.
+- needs_human_review should be true when the ticket involves money, account access, urgency, unclear intent, customer-impacting issues, or possible SLA risk.
+- Keep summary short and practical.
 
 Ticket subject:
 {subject}
@@ -339,22 +427,17 @@ Ticket subject:
         timeout=20,
     )
 
-    parsed = json.loads(response.output_text)
+    try:
+        raw = json.loads(response.output_text)
+    except Exception as e:
+        return fallback_ai_result(f"OpenAI response was not valid JSON: {str(e)}")
 
-    return {
-        "ai_category": parsed["category"],
-        "ai_priority": parsed["priority"],
-        "ai_confidence": float(parsed["confidence"]),
-        "ai_entities": json.dumps(parsed["entities"]),
-        "ai_status": "complete",
-        "ai_summary": parsed["summary"],
-        "ai_last_error": None,
-        "ai_updated_at": datetime.now(timezone.utc),
-    }
+    return normalize_ai_result(raw)
 
 
 def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
     db = SessionLocal()
+
     try:
         ticket = db.get(TicketModel, ticket_id)
         if not ticket:
@@ -388,16 +471,19 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
                 "ai_status": ticket.ai_status,
                 "ai_source": "openai",
                 "model": OPENAI_MODEL,
+                "used_fallback": result.get("used_fallback", False),
             },
         )
         db.commit()
 
     except Exception as e:
         ticket = db.get(TicketModel, ticket_id)
+
         if ticket:
             ticket.ai_status = "failed"
             ticket.ai_last_error = str(e)
             ticket.ai_updated_at = datetime.now(timezone.utc)
+
             db.commit()
             db.refresh(ticket)
 
@@ -413,6 +499,7 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
                 },
             )
             db.commit()
+
     finally:
         db.close()
 
@@ -425,6 +512,7 @@ def create_ticket(
 ):
     if payload.priority not in ALLOWED_PRIORITY:
         raise HTTPException(status_code=400, detail="Invalid priority. Use low, medium, or high.")
+
     if payload.category not in ALLOWED_CATEGORY:
         raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
 
@@ -435,6 +523,7 @@ def create_ticket(
         category=payload.category,
         ai_status="pending",
     )
+
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
@@ -444,7 +533,11 @@ def create_ticket(
         ticket_id=int(ticket.id),
         actor=actor_from_user(user),
         action="ticket.created",
-        meta={"subject": ticket.subject, "priority": ticket.priority, "category": ticket.category},
+        meta={
+            "subject": ticket.subject,
+            "priority": ticket.priority,
+            "category": ticket.category,
+        },
     )
     db.commit()
 
@@ -471,10 +564,13 @@ def list_tickets(
 
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset must be >= 0")
+
     if sort_by not in ALLOWED_SORT_BY:
         raise HTTPException(status_code=400, detail=f"sort_by must be one of {sorted(ALLOWED_SORT_BY)}")
+
     if order not in ALLOWED_ORDER:
         raise HTTPException(status_code=400, detail="order must be asc or desc")
 
@@ -482,12 +578,16 @@ def list_tickets(
 
     if q:
         base_stmt = base_stmt.where(TicketModel.subject.ilike(f"%{q.strip()}%"))
+
     if status:
         base_stmt = base_stmt.where(TicketModel.status == status)
+
     if priority:
         base_stmt = base_stmt.where(TicketModel.priority == priority)
+
     if category:
         base_stmt = base_stmt.where(TicketModel.category == category)
+
     if assignee:
         base_stmt = base_stmt.where(TicketModel.assignee == assignee)
 
@@ -538,9 +638,11 @@ def get_ticket(
     user: dict = Depends(get_current_user),
 ):
     _ = user
+
     t = db.get(TicketModel, ticket_id)
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
     return ticket_to_out(t)
 
 
@@ -568,6 +670,7 @@ def update_ticket(
     if payload.status is not None:
         if payload.status not in ALLOWED_STATUS:
             raise HTTPException(status_code=400, detail="Invalid status. Use open or closed.")
+
         if payload.status != t.status:
             changed_fields["status"] = {"from": t.status, "to": payload.status}
             t.status = payload.status
@@ -575,6 +678,7 @@ def update_ticket(
     if payload.priority is not None:
         if payload.priority not in ALLOWED_PRIORITY:
             raise HTTPException(status_code=400, detail="Invalid priority. Use low, medium, or high.")
+
         if payload.priority != t.priority:
             changed_fields["priority"] = {"from": t.priority, "to": payload.priority}
             t.priority = payload.priority
@@ -582,6 +686,7 @@ def update_ticket(
     if payload.category is not None:
         if payload.category not in ALLOWED_CATEGORY:
             raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
+
         if payload.category != t.category:
             changed_fields["category"] = {"from": t.category, "to": payload.category}
             t.category = payload.category
@@ -589,6 +694,7 @@ def update_ticket(
     if payload.assignee is not None:
         cleaned = payload.assignee.strip()
         new_assignee = cleaned if cleaned else None
+
         if new_assignee != t.assignee:
             changed_fields["assignee"] = {"from": t.assignee, "to": new_assignee}
             t.assignee = new_assignee
@@ -623,7 +729,10 @@ def update_ticket(
         ticket_id=int(t.id),
         actor=actor_from_user(user),
         action="ticket.updated",
-        meta={"changed": changed_fields, "before": before},
+        meta={
+            "changed": changed_fields,
+            "before": before,
+        },
     )
     db.commit()
 
@@ -638,6 +747,7 @@ def analyze_ticket(
     user: dict = Depends(get_current_user),
 ):
     t = db.get(TicketModel, ticket_id)
+
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
@@ -688,6 +798,7 @@ def add_message(
     user: dict = Depends(get_current_user),
 ):
     t = db.get(TicketModel, ticket_id)
+
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
@@ -699,6 +810,7 @@ def add_message(
         sender_type=payload.sender_type,
         body=payload.body.strip(),
     )
+
     db.add(m)
     db.commit()
     db.refresh(m)
@@ -708,7 +820,10 @@ def add_message(
         ticket_id=int(t.id),
         actor=actor_from_user(user),
         action="message.added",
-        meta={"sender_type": m.sender_type, "body_preview": (m.body[:80] if m.body else "")},
+        meta={
+            "sender_type": m.sender_type,
+            "body_preview": m.body[:80] if m.body else "",
+        },
     )
     db.commit()
 
@@ -730,6 +845,7 @@ def list_messages(
     _ = user
 
     t = db.get(TicketModel, ticket_id)
+
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
@@ -738,6 +854,7 @@ def list_messages(
         .where(MessageModel.ticket_id == ticket_id)
         .order_by(MessageModel.created_at.asc())
     )
+
     rows = db.execute(stmt).scalars().all()
 
     return [
@@ -762,6 +879,7 @@ def list_audit_logs(
     _ = user
 
     t = db.get(TicketModel, ticket_id)
+
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
@@ -774,6 +892,7 @@ def list_audit_logs(
         .order_by(AuditLogModel.created_at.desc())
         .limit(limit)
     )
+
     rows = db.execute(stmt).scalars().all()
 
     return [

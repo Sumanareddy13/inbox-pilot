@@ -29,6 +29,9 @@ ALLOWED_SENDER = {"customer", "agent", "system"}
 ALLOWED_SORT_BY = {"created_at", "priority", "due_at", "status"}
 ALLOWED_ORDER = {"asc", "desc"}
 
+AI_MAX_ATTEMPTS = 3
+AI_RETRY_BACKOFF_SECONDS = [1.0, 2.0]
+
 
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "").strip()
 if not SUPABASE_PROJECT_URL:
@@ -225,7 +228,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="1.1.0")
+app = FastAPI(title="Inbox Pilot API", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -272,6 +275,36 @@ def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Option
         meta_json=meta_json,
     )
     db.add(row)
+
+
+def is_retryable_ai_error(error: Exception) -> bool:
+    message = str(error).lower()
+
+    retryable_signals = [
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "connection",
+    ]
+
+    non_retryable_signals = [
+        "incorrect api key",
+        "invalid api key",
+        "insufficient_quota",
+        "401",
+        "403",
+    ]
+
+    if any(signal in message for signal in non_retryable_signals):
+        return False
+
+    return any(signal in message for signal in retryable_signals)
 
 
 def fallback_ai_result(reason: str) -> dict:
@@ -435,6 +468,56 @@ Ticket subject:
     return normalize_ai_result(raw)
 
 
+def run_openai_analysis_with_retries(ticket_id: int, subject: str, actor: str, db: Session) -> dict:
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, AI_MAX_ATTEMPTS + 1):
+        try:
+            log_event(
+                db=db,
+                ticket_id=ticket_id,
+                actor=actor,
+                action="ticket.ai_analysis_attempted",
+                meta={
+                    "attempt": attempt,
+                    "max_attempts": AI_MAX_ATTEMPTS,
+                    "ai_source": "openai",
+                    "model": OPENAI_MODEL,
+                },
+            )
+            db.commit()
+
+            return run_openai_analysis(subject)
+
+        except Exception as e:
+            last_error = e
+            retryable = is_retryable_ai_error(e)
+
+            log_event(
+                db=db,
+                ticket_id=ticket_id,
+                actor=actor,
+                action="ticket.ai_analysis_attempt_failed",
+                meta={
+                    "attempt": attempt,
+                    "max_attempts": AI_MAX_ATTEMPTS,
+                    "retryable": retryable,
+                    "error": str(e),
+                    "ai_source": "openai",
+                    "model": OPENAI_MODEL,
+                },
+            )
+            db.commit()
+
+            if not retryable or attempt >= AI_MAX_ATTEMPTS:
+                break
+
+            backoff_seconds = AI_RETRY_BACKOFF_SECONDS[min(attempt - 1, len(AI_RETRY_BACKOFF_SECONDS) - 1)]
+            time.sleep(backoff_seconds)
+
+    raise RuntimeError(str(last_error) if last_error else "AI analysis failed")
+
+
 def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
     db = SessionLocal()
 
@@ -443,9 +526,14 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
         if not ticket:
             return
 
-        time.sleep(1.5)
+        time.sleep(1.0)
 
-        result = run_openai_analysis(ticket.subject)
+        result = run_openai_analysis_with_retries(
+            ticket_id=int(ticket.id),
+            subject=ticket.subject,
+            actor=actor,
+            db=db,
+        )
 
         ticket.ai_category = result["ai_category"]
         ticket.ai_priority = result["ai_priority"]
@@ -472,6 +560,7 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
                 "ai_source": "openai",
                 "model": OPENAI_MODEL,
                 "used_fallback": result.get("used_fallback", False),
+                "max_attempts": AI_MAX_ATTEMPTS,
             },
         )
         db.commit()
@@ -496,6 +585,7 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
                     "error": str(e),
                     "ai_source": "openai",
                     "model": OPENAI_MODEL,
+                    "max_attempts": AI_MAX_ATTEMPTS,
                 },
             )
             db.commit()
@@ -777,6 +867,7 @@ def analyze_ticket(
             "ai_status": "running",
             "ai_source": "openai",
             "model": OPENAI_MODEL,
+            "max_attempts": AI_MAX_ATTEMPTS,
         },
     )
     db.commit()

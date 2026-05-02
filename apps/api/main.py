@@ -14,11 +14,11 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Response, Backgroun
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, asc, func
+from sqlalchemy import select, desc, asc, func, or_
 from openai import OpenAI
 
 from db import SessionLocal
-from models import TicketModel, MessageModel, AuditLogModel
+from models import TicketModel, MessageModel, AuditLogModel, KnowledgeBaseModel
 
 
 ALLOWED_PRIORITY = {"low", "medium", "high"}
@@ -220,6 +220,32 @@ class AiAnalysisResult(BaseModel):
     entities: AiEntities
 
 
+class KnowledgeBaseCreate(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    body: str = Field(min_length=10, max_length=10000)
+    category: str = Field(default="other")
+    tags: List[str] = Field(default_factory=list)
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=3, max_length=200)
+    body: Optional[str] = Field(default=None, min_length=10, max_length=10000)
+    category: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
+class KnowledgeBaseOut(BaseModel):
+    id: int
+    title: str
+    body: str
+    category: str
+    tags: List[str]
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -228,7 +254,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="1.2.0")
+app = FastAPI(title="Inbox Pilot API", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -263,6 +289,45 @@ def ticket_to_out(t: TicketModel) -> dict:
         "ai_last_error": t.ai_last_error,
         "ai_updated_at": t.ai_updated_at.isoformat() if t.ai_updated_at else None,
     }
+
+
+def kb_to_out(k: KnowledgeBaseModel) -> dict:
+    tags: List[str] = []
+
+    if k.tags_json:
+        try:
+            parsed = json.loads(k.tags_json)
+            if isinstance(parsed, list):
+                tags = [str(tag) for tag in parsed]
+        except Exception:
+            tags = []
+
+    return {
+        "id": int(k.id),
+        "title": k.title,
+        "body": k.body,
+        "category": k.category,
+        "tags": tags,
+        "is_active": bool(k.is_active),
+        "created_at": k.created_at.isoformat(),
+        "updated_at": k.updated_at.isoformat(),
+    }
+
+
+def clean_tags(tags: List[str]) -> List[str]:
+    cleaned = []
+    seen = set()
+
+    for tag in tags:
+        value = str(tag).strip().lower()
+        if not value:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+
+    return cleaned[:12]
 
 
 def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
@@ -382,49 +447,23 @@ def run_openai_analysis(subject: str) -> dict:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "category": {
-                "type": "string",
-                "enum": ["billing", "login", "refund", "other"],
-            },
-            "priority": {
-                "type": "string",
-                "enum": ["low", "medium", "high"],
-            },
-            "confidence": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
-            },
-            "summary": {
-                "type": "string",
-            },
+            "category": {"type": "string", "enum": ["billing", "login", "refund", "other"]},
+            "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "summary": {"type": "string"},
             "entities": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "customer_email": {"type": ["string", "null"]},
                     "order_id": {"type": ["string", "null"]},
-                    "keywords": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
+                    "keywords": {"type": "array", "items": {"type": "string"}},
                     "needs_human_review": {"type": "boolean"},
                 },
-                "required": [
-                    "customer_email",
-                    "order_id",
-                    "keywords",
-                    "needs_human_review",
-                ],
+                "required": ["customer_email", "order_id", "keywords", "needs_human_review"],
             },
         },
-        "required": [
-            "category",
-            "priority",
-            "confidence",
-            "summary",
-            "entities",
-        ],
+        "required": ["category", "priority", "confidence", "summary", "entities"],
     }
 
     prompt = f"""
@@ -710,11 +749,7 @@ def list_tickets(
     response.headers["X-Total-Count"] = str(total)
 
     next_offset = offset + len(rows)
-    if next_offset < total:
-        response.headers["X-Next-Offset"] = str(next_offset)
-    else:
-        response.headers["X-Next-Offset"] = ""
-
+    response.headers["X-Next-Offset"] = str(next_offset) if next_offset < total else ""
     response.headers["X-Limit"] = str(limit)
     response.headers["X-Offset"] = str(offset)
 
@@ -760,7 +795,6 @@ def update_ticket(
     if payload.status is not None:
         if payload.status not in ALLOWED_STATUS:
             raise HTTPException(status_code=400, detail="Invalid status. Use open or closed.")
-
         if payload.status != t.status:
             changed_fields["status"] = {"from": t.status, "to": payload.status}
             t.status = payload.status
@@ -768,7 +802,6 @@ def update_ticket(
     if payload.priority is not None:
         if payload.priority not in ALLOWED_PRIORITY:
             raise HTTPException(status_code=400, detail="Invalid priority. Use low, medium, or high.")
-
         if payload.priority != t.priority:
             changed_fields["priority"] = {"from": t.priority, "to": payload.priority}
             t.priority = payload.priority
@@ -776,7 +809,6 @@ def update_ticket(
     if payload.category is not None:
         if payload.category not in ALLOWED_CATEGORY:
             raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
-
         if payload.category != t.category:
             changed_fields["category"] = {"from": t.category, "to": payload.category}
             t.category = payload.category
@@ -997,3 +1029,127 @@ def list_audit_logs(
         }
         for a in rows
     ]
+
+
+@app.post("/knowledge", response_model=KnowledgeBaseOut)
+def create_knowledge_article(
+    payload: KnowledgeBaseCreate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    if payload.category not in ALLOWED_CATEGORY:
+        raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
+
+    tags = clean_tags(payload.tags)
+
+    row = KnowledgeBaseModel(
+        title=payload.title.strip(),
+        body=payload.body.strip(),
+        category=payload.category,
+        tags_json=json.dumps(tags),
+        is_active=True,
+    )
+
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    return kb_to_out(row)
+
+
+@app.get("/knowledge", response_model=List[KnowledgeBaseOut])
+def list_knowledge_articles(
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    active: Optional[bool] = True,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _ = user
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+
+    stmt = select(KnowledgeBaseModel)
+
+    if q:
+        term = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                KnowledgeBaseModel.title.ilike(term),
+                KnowledgeBaseModel.body.ilike(term),
+                KnowledgeBaseModel.tags_json.ilike(term),
+            )
+        )
+
+    if category:
+        if category not in ALLOWED_CATEGORY:
+            raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
+        stmt = stmt.where(KnowledgeBaseModel.category == category)
+
+    if active is not None:
+        stmt = stmt.where(KnowledgeBaseModel.is_active == active)
+
+    stmt = stmt.order_by(desc(KnowledgeBaseModel.updated_at), desc(KnowledgeBaseModel.id))
+    stmt = stmt.limit(limit).offset(offset)
+
+    rows = db.execute(stmt).scalars().all()
+    return [kb_to_out(row) for row in rows]
+
+
+@app.get("/knowledge/{article_id}", response_model=KnowledgeBaseOut)
+def get_knowledge_article(
+    article_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _ = user
+
+    row = db.get(KnowledgeBaseModel, article_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Knowledge article not found")
+
+    return kb_to_out(row)
+
+
+@app.patch("/knowledge/{article_id}", response_model=KnowledgeBaseOut)
+def update_knowledge_article(
+    article_id: int,
+    payload: KnowledgeBaseUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _ = user
+
+    row = db.get(KnowledgeBaseModel, article_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Knowledge article not found")
+
+    if payload.title is not None:
+        row.title = payload.title.strip()
+
+    if payload.body is not None:
+        row.body = payload.body.strip()
+
+    if payload.category is not None:
+        if payload.category not in ALLOWED_CATEGORY:
+            raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
+        row.category = payload.category
+
+    if payload.tags is not None:
+        row.tags_json = json.dumps(clean_tags(payload.tags))
+
+    if payload.is_active is not None:
+        row.is_active = payload.is_active
+
+    row.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(row)
+
+    return kb_to_out(row)

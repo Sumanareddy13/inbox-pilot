@@ -25,13 +25,13 @@ ALLOWED_PRIORITY = {"low", "medium", "high"}
 ALLOWED_CATEGORY = {"billing", "login", "refund", "other"}
 ALLOWED_STATUS = {"open", "closed"}
 ALLOWED_SENDER = {"customer", "agent", "system"}
+ALLOWED_DRAFT_STATUS = {"not_generated", "generated", "edited", "approved", "rejected"}
 
 ALLOWED_SORT_BY = {"created_at", "priority", "due_at", "status"}
 ALLOWED_ORDER = {"asc", "desc"}
 
 AI_MAX_ATTEMPTS = 3
 AI_RETRY_BACKOFF_SECONDS = [1.0, 2.0]
-
 
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "").strip()
 if not SUPABASE_PROJECT_URL:
@@ -182,6 +182,12 @@ class TicketOut(BaseModel):
     ai_last_error: Optional[str]
     ai_updated_at: Optional[str]
 
+    draft_reply: Optional[str]
+    draft_status: str
+    draft_kb_refs: Optional[str]
+    draft_last_error: Optional[str]
+    draft_updated_at: Optional[str]
+
 
 class MessageCreate(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
@@ -246,6 +252,11 @@ class KnowledgeBaseOut(BaseModel):
     updated_at: str
 
 
+class DraftUpdate(BaseModel):
+    draft_reply: Optional[str] = Field(default=None, min_length=1, max_length=10000)
+    draft_status: str
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -254,7 +265,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Inbox Pilot API", version="1.3.0")
+app = FastAPI(title="Inbox Pilot API", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -288,6 +299,11 @@ def ticket_to_out(t: TicketModel) -> dict:
         "ai_summary": t.ai_summary,
         "ai_last_error": t.ai_last_error,
         "ai_updated_at": t.ai_updated_at.isoformat() if t.ai_updated_at else None,
+        "draft_reply": t.draft_reply,
+        "draft_status": t.draft_status or "not_generated",
+        "draft_kb_refs": t.draft_kb_refs,
+        "draft_last_error": t.draft_last_error,
+        "draft_updated_at": t.draft_updated_at.isoformat() if t.draft_updated_at else None,
     }
 
 
@@ -331,15 +347,66 @@ def clean_tags(tags: List[str]) -> List[str]:
 
 
 def log_event(db: Session, ticket_id: int, actor: str, action: str, meta: Optional[dict] = None) -> None:
-    meta_json = json.dumps(meta) if meta is not None else None
-
     row = AuditLogModel(
         ticket_id=ticket_id,
         actor=actor,
         action=action,
-        meta_json=meta_json,
+        meta_json=json.dumps(meta) if meta is not None else None,
     )
     db.add(row)
+
+
+def parse_json_text(value: Optional[str], fallback):
+    if not value:
+        return fallback
+
+    try:
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+
+def get_recent_messages_for_ticket(db: Session, ticket_id: int, limit: int = 8) -> List[MessageModel]:
+    stmt = (
+        select(MessageModel)
+        .where(MessageModel.ticket_id == ticket_id)
+        .order_by(MessageModel.created_at.desc())
+        .limit(limit)
+    )
+
+    rows = db.execute(stmt).scalars().all()
+    return list(reversed(rows))
+
+
+def find_relevant_kb_articles(db: Session, ticket: TicketModel, limit: int = 3) -> List[KnowledgeBaseModel]:
+    category_candidates = []
+
+    if ticket.ai_category:
+        category_candidates.append(ticket.ai_category)
+
+    if ticket.category:
+        category_candidates.append(ticket.category)
+
+    stmt = select(KnowledgeBaseModel).where(KnowledgeBaseModel.is_active == True)
+
+    if category_candidates:
+        stmt = stmt.where(KnowledgeBaseModel.category.in_(category_candidates))
+
+    stmt = stmt.order_by(desc(KnowledgeBaseModel.updated_at), desc(KnowledgeBaseModel.id)).limit(limit)
+
+    rows = db.execute(stmt).scalars().all()
+
+    if rows:
+        return rows
+
+    fallback_stmt = (
+        select(KnowledgeBaseModel)
+        .where(KnowledgeBaseModel.is_active == True)
+        .order_by(desc(KnowledgeBaseModel.updated_at), desc(KnowledgeBaseModel.id))
+        .limit(limit)
+    )
+
+    return db.execute(fallback_stmt).scalars().all()
 
 
 def is_retryable_ai_error(error: Exception) -> bool:
@@ -633,6 +700,75 @@ def process_ticket_analysis_async(ticket_id: int, actor: str) -> None:
         db.close()
 
 
+def generate_grounded_draft_with_openai(ticket: TicketModel, messages: List[MessageModel], kb_articles: List[KnowledgeBaseModel]) -> str:
+    if not openai_client:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    message_context = "\n".join(
+        [f"- {m.sender_type}: {m.body}" for m in messages]
+    ) or "No messages yet."
+
+    kb_context = "\n\n".join(
+        [
+            f"KB #{int(k.id)} | {k.title} | category={k.category}\n{k.body}"
+            for k in kb_articles
+        ]
+    ) or "No relevant knowledge base article found."
+
+    ai_context = {
+        "ai_category": ticket.ai_category,
+        "ai_priority": ticket.ai_priority,
+        "ai_confidence": ticket.ai_confidence,
+        "ai_summary": ticket.ai_summary,
+        "ai_entities": parse_json_text(ticket.ai_entities, {}),
+    }
+
+    prompt = f"""
+You are drafting a customer support reply for Inbox Pilot.
+
+Write a concise, helpful draft reply for a human agent to review.
+
+Rules:
+- Use only the ticket, messages, AI triage, and knowledge base context below.
+- Do not invent order IDs, refunds, policy details, timelines, or account information.
+- If information is missing, ask the customer for it.
+- Keep the tone professional and human.
+- Do not say "as an AI".
+- Do not mention internal tools, AI analysis, confidence, or knowledge base.
+- Return only the draft reply text.
+
+Ticket:
+ID: {int(ticket.id)}
+Subject: {ticket.subject}
+Current status: {ticket.status}
+Priority: {ticket.priority}
+Category: {ticket.category}
+Assignee: {ticket.assignee or "Unassigned"}
+
+AI triage:
+{json.dumps(ai_context, indent=2)}
+
+Recent conversation:
+{message_context}
+
+Relevant knowledge base:
+{kb_context}
+""".strip()
+
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        input=prompt,
+        timeout=25,
+    )
+
+    draft = response.output_text.strip()
+
+    if len(draft) < 20:
+        raise RuntimeError("Generated draft was too short to be useful.")
+
+    return draft
+
+
 @app.post("/tickets", response_model=TicketOut)
 def create_ticket(
     payload: TicketCreate,
@@ -651,6 +787,7 @@ def create_ticket(
         priority=payload.priority,
         category=payload.category,
         ai_status="pending",
+        draft_status="not_generated",
     )
 
     db.add(ticket)
@@ -913,6 +1050,147 @@ def analyze_ticket(
     return ticket_to_out(t)
 
 
+@app.post("/tickets/{ticket_id}/draft", response_model=TicketOut)
+def generate_ticket_draft(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    t = db.get(TicketModel, ticket_id)
+
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    actor = actor_from_user(user)
+
+    messages = get_recent_messages_for_ticket(db, ticket_id=ticket_id)
+    kb_articles = find_relevant_kb_articles(db, ticket=t, limit=3)
+
+    if not kb_articles:
+        raise HTTPException(status_code=400, detail="No active knowledge base articles found. Create a KB article first.")
+
+    kb_refs = [
+        {
+            "id": int(k.id),
+            "title": k.title,
+            "category": k.category,
+        }
+        for k in kb_articles
+    ]
+
+    try:
+        draft = generate_grounded_draft_with_openai(
+            ticket=t,
+            messages=messages,
+            kb_articles=kb_articles,
+        )
+
+        t.draft_reply = draft
+        t.draft_status = "generated"
+        t.draft_kb_refs = json.dumps(kb_refs)
+        t.draft_last_error = None
+        t.draft_updated_at = datetime.now(timezone.utc)
+
+        db.commit()
+        db.refresh(t)
+
+        log_event(
+            db=db,
+            ticket_id=int(t.id),
+            actor=actor,
+            action="draft.generated",
+            meta={
+                "kb_refs": kb_refs,
+                "draft_length": len(draft),
+                "ai_source": "openai",
+                "model": OPENAI_MODEL,
+            },
+        )
+        db.commit()
+
+        return ticket_to_out(t)
+
+    except Exception as e:
+        t.draft_status = "not_generated"
+        t.draft_last_error = str(e)
+        t.draft_updated_at = datetime.now(timezone.utc)
+
+        db.commit()
+        db.refresh(t)
+
+        log_event(
+            db=db,
+            ticket_id=int(t.id),
+            actor=actor,
+            action="draft.generation_failed",
+            meta={
+                "error": str(e),
+                "kb_refs": kb_refs,
+                "ai_source": "openai",
+                "model": OPENAI_MODEL,
+            },
+        )
+        db.commit()
+
+        return ticket_to_out(t)
+
+
+@app.patch("/tickets/{ticket_id}/draft", response_model=TicketOut)
+def update_ticket_draft(
+    ticket_id: int,
+    payload: DraftUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    t = db.get(TicketModel, ticket_id)
+
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if payload.draft_status not in ALLOWED_DRAFT_STATUS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"draft_status must be one of {sorted(ALLOWED_DRAFT_STATUS)}",
+        )
+
+    if payload.draft_status in {"edited", "approved"} and not payload.draft_reply and not t.draft_reply:
+        raise HTTPException(status_code=400, detail="draft_reply is required before editing or approving.")
+
+    old_status = t.draft_status or "not_generated"
+
+    if payload.draft_reply is not None:
+        t.draft_reply = payload.draft_reply.strip()
+
+    t.draft_status = payload.draft_status
+    t.draft_updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(t)
+
+    action = "draft.updated"
+    if payload.draft_status == "approved":
+        action = "draft.approved"
+    elif payload.draft_status == "rejected":
+        action = "draft.rejected"
+    elif payload.draft_status == "edited":
+        action = "draft.edited"
+
+    log_event(
+        db=db,
+        ticket_id=int(t.id),
+        actor=actor_from_user(user),
+        action=action,
+        meta={
+            "from_status": old_status,
+            "to_status": t.draft_status,
+            "draft_length": len(t.draft_reply or ""),
+        },
+    )
+    db.commit()
+
+    return ticket_to_out(t)
+
+
 @app.post("/tickets/{ticket_id}/messages", response_model=MessageOut)
 def add_message(
     ticket_id: int,
@@ -1037,6 +1315,8 @@ def create_knowledge_article(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
+    _ = user
+
     if payload.category not in ALLOWED_CATEGORY:
         raise HTTPException(status_code=400, detail="Invalid category. Use billing, login, refund, or other.")
 

@@ -26,6 +26,12 @@ class TicketModel(Base):
     ai_last_error = Column(Text, nullable=True)
     ai_updated_at = Column(DateTime(timezone=True), nullable=True)
 
+    draft_reply = Column(Text, nullable=True)
+    draft_status = Column(String, nullable=False, default="not_generated")
+    draft_kb_refs = Column(Text, nullable=True)
+    draft_last_error = Column(Text, nullable=True)
+    draft_updated_at = Column(DateTime(timezone=True), nullable=True)
+
     messages = relationship(
         "MessageModel",
         back_populates="ticket",

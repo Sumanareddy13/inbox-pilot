@@ -38,15 +38,6 @@ type Message = {
   created_at: string;
 };
 
-type AuditLog = {
-  id: number;
-  ticket_id: number;
-  actor: string;
-  action: string;
-  meta_json: string | null;
-  created_at: string;
-};
-
 type ParsedEntities = {
   customer_email: string | null;
   order_id: string | null;
@@ -64,10 +55,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
 function getAssignees(): string[] {
   const raw = process.env.NEXT_PUBLIC_ASSIGNEES || "Sumana";
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 function formatSla(dueAt: string | null) {
@@ -99,7 +87,6 @@ function parseEntities(raw: string | null): ParsedEntities | null {
 
   try {
     const parsed = JSON.parse(raw);
-
     return {
       customer_email: parsed.customer_email ?? null,
       order_id: parsed.order_id ?? null,
@@ -128,136 +115,44 @@ function parseKbRefs(raw: string | null): KbRef[] {
   }
 }
 
-function aiStatusStyle(status: string): React.CSSProperties {
-  const base: React.CSSProperties = {
+function pillStyle(color: "green" | "amber" | "red" | "blue" | "neutral"): React.CSSProperties {
+  const colors = {
+    green: ["rgba(34,197,94,0.42)", "rgba(34,197,94,0.12)"],
+    amber: ["rgba(245,158,11,0.45)", "rgba(245,158,11,0.14)"],
+    red: ["rgba(239,68,68,0.45)", "rgba(239,68,68,0.14)"],
+    blue: ["rgba(59,130,246,0.45)", "rgba(59,130,246,0.14)"],
+    neutral: ["rgba(255,255,255,0.14)", "rgba(255,255,255,0.06)"],
+  };
+
+  return {
     display: "inline-flex",
     alignItems: "center",
     padding: "4px 10px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.06)",
+    border: `1px solid ${colors[color][0]}`,
+    background: colors[color][1],
     fontSize: 12,
     fontWeight: 800,
     color: "white",
   };
-
-  if (status === "running") {
-    return {
-      ...base,
-      borderColor: "rgba(245,158,11,0.45)",
-      background: "rgba(245,158,11,0.14)",
-    };
-  }
-
-  if (status === "complete") {
-    return {
-      ...base,
-      borderColor: "rgba(34,197,94,0.4)",
-      background: "rgba(34,197,94,0.12)",
-    };
-  }
-
-  if (status === "failed") {
-    return {
-      ...base,
-      borderColor: "rgba(239,68,68,0.45)",
-      background: "rgba(239,68,68,0.14)",
-    };
-  }
-
-  return base;
 }
 
-function draftStatusStyle(status: string): React.CSSProperties {
-  const base: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    padding: "4px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.06)",
-    fontSize: 12,
-    fontWeight: 800,
-    color: "white",
-  };
-
-  if (status === "generated" || status === "edited") {
-    return {
-      ...base,
-      borderColor: "rgba(59,130,246,0.45)",
-      background: "rgba(59,130,246,0.14)",
-    };
-  }
-
-  if (status === "approved") {
-    return {
-      ...base,
-      borderColor: "rgba(34,197,94,0.42)",
-      background: "rgba(34,197,94,0.12)",
-    };
-  }
-
-  if (status === "rejected") {
-    return {
-      ...base,
-      borderColor: "rgba(239,68,68,0.45)",
-      background: "rgba(239,68,68,0.14)",
-    };
-  }
-
-  return base;
+function statusPill(status: string) {
+  if (status === "complete" || status === "approved") return pillStyle("green");
+  if (status === "running" || status === "edited" || status === "generated") return pillStyle("amber");
+  if (status === "failed" || status === "rejected") return pillStyle("red");
+  return pillStyle("neutral");
 }
 
 function confidenceStyle(value: number | null): React.CSSProperties {
-  const base: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    padding: "4px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.06)",
-    fontSize: 12,
-    fontWeight: 800,
-    color: "white",
-  };
-
-  if (value === null || value === undefined) return base;
-
-  if (value >= 0.8) {
-    return {
-      ...base,
-      borderColor: "rgba(34,197,94,0.42)",
-      background: "rgba(34,197,94,0.12)",
-    };
-  }
-
-  if (value >= 0.5) {
-    return {
-      ...base,
-      borderColor: "rgba(245,158,11,0.45)",
-      background: "rgba(245,158,11,0.14)",
-    };
-  }
-
-  return {
-    ...base,
-    borderColor: "rgba(239,68,68,0.45)",
-    background: "rgba(239,68,68,0.14)",
-  };
+  if (value === null || value === undefined) return pillStyle("neutral");
+  if (value >= 0.8) return pillStyle("green");
+  if (value >= 0.5) return pillStyle("amber");
+  return pillStyle("red");
 }
 
 function smallPillStyle(): React.CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    padding: "4px 9px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.06)",
-    fontSize: 12,
-    fontWeight: 700,
-    color: "white",
-  };
+  return pillStyle("neutral");
 }
 
 function cardStyle(): React.CSSProperties {
@@ -274,9 +169,7 @@ function buttonStyle(primary = false, danger = false): React.CSSProperties {
   return {
     padding: "8px 12px",
     borderRadius: 10,
-    border: danger
-      ? "1px solid rgba(239,68,68,0.35)"
-      : "1px solid rgba(255,255,255,0.16)",
+    border: danger ? "1px solid rgba(239,68,68,0.35)" : "1px solid rgba(255,255,255,0.16)",
     background: danger
       ? "rgba(239,68,68,0.12)"
       : primary
@@ -298,7 +191,6 @@ export default function TicketPage() {
 
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [audit, setAudit] = useState<AuditLog[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -321,7 +213,6 @@ export default function TicketPage() {
 
       if (!token) {
         router.push("/login");
-        return;
       }
     })();
   }, [router]);
@@ -333,29 +224,20 @@ export default function TicketPage() {
   async function loadTicketData(token: string, id: string) {
     const headers = { Authorization: `Bearer ${token}` };
 
-    const [tRes, mRes, aRes] = await Promise.all([
+    const [tRes, mRes] = await Promise.all([
       fetch(`${API_BASE}/tickets/${id}`, { cache: "no-store", headers }),
       fetch(`${API_BASE}/tickets/${id}/messages`, { cache: "no-store", headers }),
-      fetch(`${API_BASE}/tickets/${id}/audit`, { cache: "no-store", headers }),
     ]);
 
     if (!tRes.ok) throw new Error(`Ticket fetch failed: ${tRes.status} ${await tRes.text()}`);
     if (!mRes.ok) throw new Error(`Messages fetch failed: ${mRes.status} ${await mRes.text()}`);
-    if (!aRes.ok) throw new Error(`Audit fetch failed: ${aRes.status} ${await aRes.text()}`);
 
-    const t = (await tRes.json()) as Ticket;
-    const m = (await mRes.json()) as Message[];
-    const a = (await aRes.json()) as AuditLog[];
-
-    setTicket(t);
-    setMessages(m);
-    setAudit(a);
+    setTicket((await tRes.json()) as Ticket);
+    setMessages((await mRes.json()) as Message[]);
   }
 
   useEffect(() => {
-    if (!sessionChecked) return;
-    if (!accessToken) return;
-    if (!ticketId) return;
+    if (!sessionChecked || !accessToken || !ticketId) return;
 
     (async () => {
       try {
@@ -398,10 +280,7 @@ export default function TicketPage() {
       cache: "no-store",
     });
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`${res.status} ${text}`);
-    }
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 
     await loadTicketData(accessToken, ticketId);
   }
@@ -414,15 +293,10 @@ export default function TicketPage() {
 
       const res = await fetch(`${API_BASE}/tickets/${ticketId}/analyze`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`${res.status} ${text}`);
-      }
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 
       await loadTicketData(accessToken, ticketId);
     } catch (e: any) {
@@ -439,15 +313,10 @@ export default function TicketPage() {
 
       const res = await fetch(`${API_BASE}/tickets/${ticketId}/draft`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`${res.status} ${text}`);
-      }
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 
       await loadTicketData(accessToken, ticketId);
     } catch (e: any) {
@@ -460,15 +329,15 @@ export default function TicketPage() {
   async function updateDraft(status: "edited" | "approved" | "rejected") {
     if (!accessToken || !ticketId) return;
 
-    const body =
-      status === "rejected"
-        ? { draft_status: "rejected" }
-        : { draft_status: status, draft_reply: draftText.trim() };
-
     if (status !== "rejected" && !draftText.trim()) {
       alert("Draft cannot be empty.");
       return;
     }
+
+    const body =
+      status === "rejected"
+        ? { draft_status: "rejected" }
+        : { draft_status: status, draft_reply: draftText.trim() };
 
     try {
       setSavingDraft(true);
@@ -482,10 +351,7 @@ export default function TicketPage() {
         body: JSON.stringify(body),
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`${res.status} ${text}`);
-      }
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 
       await loadTicketData(accessToken, ticketId);
     } catch (e: any) {
@@ -495,55 +361,9 @@ export default function TicketPage() {
     }
   }
 
-  async function assignTicket(assignee: string) {
-    await apiPatch({ assignee });
-  }
-
-  async function closeTicket() {
-    await apiPatch({ status: "closed" });
-  }
-
-  async function setSlaHours(hours: number) {
-    const due = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
-    await apiPatch({ due_at: due });
-  }
-
-  async function clearSla() {
-    await apiPatch({ due_at: "" });
-  }
-
-  async function addMessage(body: string) {
-    if (!accessToken || !ticketId) return;
-
-    const res = await fetch(`${API_BASE}/tickets/${ticketId}/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ sender_type: "customer", body }),
-      cache: "no-store",
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`${res.status} ${text}`);
-    }
-
-    await loadTicketData(accessToken, ticketId);
-  }
-
-  if (!sessionChecked) {
-    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
-  }
-
-  if (!accessToken) {
-    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
-  }
-
-  if (loading) {
-    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading ticket…</main>;
-  }
+  if (!sessionChecked) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
+  if (!accessToken) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
+  if (loading) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading ticket…</main>;
 
   if (err) {
     return (
@@ -568,40 +388,25 @@ export default function TicketPage() {
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
         <a href="/inbox">← Back to Inbox</a>
         <a href="/knowledge">Knowledge Base</a>
+        <a href="/metrics">Metrics</a>
       </div>
 
       <h1 style={{ fontSize: 26, marginTop: 10 }}>{ticket.subject}</h1>
 
       <div style={{ marginTop: 8, opacity: 0.85 }}>
+        <div><b>Ticket:</b> #{ticket.id}</div>
         <div>
-          <b>Ticket:</b> #{ticket.id}
+          <b>Status:</b> {ticket.status} • <b>Priority:</b> {ticket.priority} • <b>Category:</b> {ticket.category}
         </div>
-        <div>
-          <b>Status:</b> {ticket.status} • <b>Priority:</b> {ticket.priority} • <b>Category:</b>{" "}
-          {ticket.category}
-        </div>
-        <div>
-          <b>Assignee:</b> {ticket.assignee ?? "-"}
-        </div>
-        <div>
-          <b>SLA:</b> {formatSla(ticket.due_at)} {ticket.due_at ? `(${ticket.due_at})` : ""}
-        </div>
+        <div><b>Assignee:</b> {ticket.assignee ?? "-"}</div>
+        <div><b>SLA:</b> {formatSla(ticket.due_at)} {ticket.due_at ? `(${ticket.due_at})` : ""}</div>
       </div>
 
-      <section
-        style={{
-          marginTop: 16,
-          padding: 12,
-          border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: 10,
-        }}
-      >
+      <section style={cardStyle()}>
         <h2 style={{ fontSize: 16, marginBottom: 10 }}>Actions</h2>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <label htmlFor="assignee">
-            <b>Assign:</b>
-          </label>
+          <label htmlFor="assignee"><b>Assign:</b></label>
 
           <select
             id="assignee"
@@ -609,7 +414,7 @@ export default function TicketPage() {
             style={{ padding: 8 }}
             onChange={async (e) => {
               try {
-                await assignTicket(e.target.value);
+                await apiPatch({ assignee: e.target.value });
               } catch (e: any) {
                 alert(e.message || "Assign failed");
               }
@@ -617,22 +422,14 @@ export default function TicketPage() {
           >
             <option value="">Unassigned</option>
             {assignees.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
+              <option key={name} value={name}>{name}</option>
             ))}
           </select>
 
           <button
-            onClick={async () => {
-              try {
-                await closeTicket();
-              } catch (e: any) {
-                alert(e.message || "Close failed");
-              }
-            }}
+            onClick={() => apiPatch({ status: "closed" })}
             disabled={ticket.status === "closed"}
-            style={{ padding: "8px 12px" }}
+            style={buttonStyle()}
           >
             {ticket.status === "closed" ? "Already Closed" : "Close Ticket"}
           </button>
@@ -640,39 +437,23 @@ export default function TicketPage() {
 
         <div style={{ marginTop: 12 }}>
           <b>Set SLA:</b>{" "}
-          <button style={{ padding: "6px 10px", marginRight: 8 }} onClick={() => setSlaHours(4)}>
-            +4h
-          </button>
-          <button style={{ padding: "6px 10px", marginRight: 8 }} onClick={() => setSlaHours(24)}>
-            +24h
-          </button>
-          <button style={{ padding: "6px 10px", marginRight: 8 }} onClick={() => setSlaHours(72)}>
-            +72h
-          </button>
-          <button style={{ padding: "6px 10px" }} onClick={clearSla}>
-            Clear
-          </button>
+          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString() })}>+4h</button>{" "}
+          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() })}>+24h</button>{" "}
+          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString() })}>+72h</button>{" "}
+          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: "" })}>Clear</button>
         </div>
       </section>
 
       <section style={cardStyle()}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h2 style={{ fontSize: 18, margin: 0 }}>AI Analysis</h2>
             <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
-              Analysis runs asynchronously with retries, validation, and audit tracking.
+              AI classifies urgency, extracts entities, and flags risky tickets for human review.
             </div>
           </div>
 
-          <button
-            onClick={runAnalysis}
-            disabled={runningAnalysis}
-            style={{
-              ...buttonStyle(true),
-              cursor: runningAnalysis ? "not-allowed" : "pointer",
-              opacity: runningAnalysis ? 0.65 : 1,
-            }}
-          >
+          <button onClick={runAnalysis} disabled={runningAnalysis} style={buttonStyle(true)}>
             {runningAnalysis ? "Analysis Running..." : "Run AI Analysis"}
           </button>
         </div>
@@ -680,48 +461,12 @@ export default function TicketPage() {
         <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <b>Status:</b>
-            <span style={aiStatusStyle(ticket.ai_status || "pending")}>{ticket.ai_status || "pending"}</span>
+            <span style={statusPill(ticket.ai_status || "pending")}>{ticket.ai_status || "pending"}</span>
 
             {entities?.needs_human_review && (
-              <span
-                style={{
-                  ...smallPillStyle(),
-                  borderColor: "rgba(245,158,11,0.55)",
-                  background: "rgba(245,158,11,0.15)",
-                }}
-              >
-                Needs Human Review
-              </span>
+              <span style={pillStyle("amber")}>Needs Human Review</span>
             )}
           </div>
-
-          {ticket.ai_status === "running" && (
-            <div
-              style={{
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid rgba(245,158,11,0.25)",
-                background: "rgba(245,158,11,0.08)",
-                fontSize: 13,
-              }}
-            >
-              AI analysis is running. The page refreshes automatically until the result is ready.
-            </div>
-          )}
-
-          {ticket.ai_status === "failed" && (
-            <div
-              style={{
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid rgba(239,68,68,0.35)",
-                background: "rgba(239,68,68,0.10)",
-                fontSize: 13,
-              }}
-            >
-              AI analysis failed. You can retry after checking the error below.
-            </div>
-          )}
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
             <div>
@@ -749,15 +494,7 @@ export default function TicketPage() {
 
           <div>
             <div style={{ fontSize: 12, opacity: 0.72 }}>Summary</div>
-            <div
-              style={{
-                marginTop: 6,
-                padding: 12,
-                borderRadius: 10,
-                background: "rgba(255,255,255,0.045)",
-                border: "1px solid rgba(255,255,255,0.08)",
-              }}
-            >
+            <div style={{ marginTop: 6, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.045)" }}>
               {ticket.ai_summary ?? "-"}
             </div>
           </div>
@@ -768,33 +505,15 @@ export default function TicketPage() {
             {!entities ? (
               <div style={{ marginTop: 6, opacity: 0.8 }}>No entities available.</div>
             ) : (
-              <div
-                style={{
-                  marginTop: 8,
-                  display: "grid",
-                  gap: 10,
-                  padding: 12,
-                  borderRadius: 10,
-                  background: "rgba(255,255,255,0.045)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                }}
-              >
-                <div>
-                  <b>Email:</b> {entities.customer_email ?? "-"}
-                </div>
-                <div>
-                  <b>Order ID:</b> {entities.order_id ?? "-"}
-                </div>
+              <div style={{ marginTop: 8, display: "grid", gap: 10, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.045)" }}>
+                <div><b>Email:</b> {entities.customer_email ?? "-"}</div>
+                <div><b>Order ID:</b> {entities.order_id ?? "-"}</div>
                 <div>
                   <b>Keywords:</b>{" "}
-                  {entities.keywords.length === 0 ? (
-                    "-"
-                  ) : (
+                  {entities.keywords.length === 0 ? "-" : (
                     <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", marginLeft: 6 }}>
                       {entities.keywords.map((keyword) => (
-                        <span key={keyword} style={smallPillStyle()}>
-                          {keyword}
-                        </span>
+                        <span key={keyword} style={smallPillStyle()}>{keyword}</span>
                       ))}
                     </span>
                   )}
@@ -803,45 +522,24 @@ export default function TicketPage() {
             )}
           </div>
 
-          <div>
-            <div style={{ fontSize: 12, opacity: 0.72 }}>Last Error</div>
-            <div
-              style={{
-                marginTop: 6,
-                padding: 10,
-                borderRadius: 10,
-                background: ticket.ai_last_error ? "rgba(239,68,68,0.10)" : "rgba(255,255,255,0.04)",
-                border: ticket.ai_last_error
-                  ? "1px solid rgba(239,68,68,0.28)"
-                  : "1px solid rgba(255,255,255,0.08)",
-                fontSize: 13,
-                overflowX: "auto",
-              }}
-            >
-              {ticket.ai_last_error ?? "-"}
+          {ticket.ai_last_error && (
+            <div style={{ padding: 10, borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.28)", fontSize: 13 }}>
+              <b>AI Error:</b> {ticket.ai_last_error}
             </div>
-          </div>
+          )}
         </div>
       </section>
 
       <section style={cardStyle()}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h2 style={{ fontSize: 18, margin: 0 }}>Grounded Draft</h2>
             <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
-              Drafts are generated from ticket context and active knowledge base articles. Human approval is required.
+              Drafts use ticket context and approved knowledge articles. Agents approve before sending.
             </div>
           </div>
 
-          <button
-            onClick={generateDraft}
-            disabled={generatingDraft}
-            style={{
-              ...buttonStyle(true),
-              cursor: generatingDraft ? "not-allowed" : "pointer",
-              opacity: generatingDraft ? 0.65 : 1,
-            }}
-          >
+          <button onClick={generateDraft} disabled={generatingDraft} style={buttonStyle(true)}>
             {generatingDraft ? "Generating..." : "Generate Draft"}
           </button>
         </div>
@@ -849,13 +547,10 @@ export default function TicketPage() {
         <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <b>Status:</b>
-            <span style={draftStatusStyle(ticket.draft_status || "not_generated")}>
+            <span style={statusPill(ticket.draft_status || "not_generated")}>
               {ticket.draft_status || "not_generated"}
             </span>
-
-            {ticket.draft_updated_at && (
-              <span style={{ fontSize: 12, opacity: 0.75 }}>Updated: {ticket.draft_updated_at}</span>
-            )}
+            {ticket.draft_updated_at && <span style={{ fontSize: 12, opacity: 0.75 }}>Updated: {ticket.draft_updated_at}</span>}
           </div>
 
           {kbRefs.length > 0 && (
@@ -872,75 +567,40 @@ export default function TicketPage() {
           )}
 
           {ticket.draft_last_error && (
-            <div
-              style={{
-                padding: 10,
-                borderRadius: 10,
-                background: "rgba(239,68,68,0.10)",
-                border: "1px solid rgba(239,68,68,0.28)",
-                fontSize: 13,
-              }}
-            >
+            <div style={{ padding: 10, borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.28)", fontSize: 13 }}>
               <b>Draft Error:</b> {ticket.draft_last_error}
             </div>
           )}
 
-          <div>
-            <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 6 }}>Draft Reply</div>
-            <textarea
-              value={draftText}
-              onChange={(e) => setDraftText(e.target.value)}
-              placeholder="Generate a grounded draft, then edit before approval..."
-              rows={9}
-              style={{
-                width: "100%",
-                padding: 12,
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(255,255,255,0.045)",
-                color: "white",
-                outline: "none",
-                resize: "vertical",
-                boxSizing: "border-box",
-                lineHeight: 1.5,
-              }}
-            />
-          </div>
+          <textarea
+            value={draftText}
+            onChange={(e) => setDraftText(e.target.value)}
+            placeholder="Generate a grounded draft, then edit before approval..."
+            rows={9}
+            style={{
+              width: "100%",
+              padding: 12,
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "rgba(255,255,255,0.045)",
+              color: "white",
+              outline: "none",
+              resize: "vertical",
+              boxSizing: "border-box",
+              lineHeight: 1.5,
+            }}
+          />
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={() => updateDraft("edited")}
-              disabled={savingDraft || !draftText.trim()}
-              style={{
-                ...buttonStyle(false),
-                opacity: savingDraft || !draftText.trim() ? 0.55 : 1,
-                cursor: savingDraft || !draftText.trim() ? "not-allowed" : "pointer",
-              }}
-            >
+            <button onClick={() => updateDraft("edited")} disabled={savingDraft || !draftText.trim()} style={buttonStyle()}>
               Save Edits
             </button>
 
-            <button
-              onClick={() => updateDraft("approved")}
-              disabled={savingDraft || !draftText.trim()}
-              style={{
-                ...buttonStyle(true),
-                opacity: savingDraft || !draftText.trim() ? 0.55 : 1,
-                cursor: savingDraft || !draftText.trim() ? "not-allowed" : "pointer",
-              }}
-            >
+            <button onClick={() => updateDraft("approved")} disabled={savingDraft || !draftText.trim()} style={buttonStyle(true)}>
               Approve Draft
             </button>
 
-            <button
-              onClick={() => updateDraft("rejected")}
-              disabled={savingDraft || ticket.draft_status === "not_generated"}
-              style={{
-                ...buttonStyle(false, true),
-                opacity: savingDraft || ticket.draft_status === "not_generated" ? 0.55 : 1,
-                cursor: savingDraft || ticket.draft_status === "not_generated" ? "not-allowed" : "pointer",
-              }}
-            >
+            <button onClick={() => updateDraft("rejected")} disabled={savingDraft || ticket.draft_status === "not_generated"} style={buttonStyle(false, true)}>
               Reject Draft
             </button>
           </div>
@@ -952,7 +612,21 @@ export default function TicketPage() {
       <MessageComposer
         onSend={async (body) => {
           try {
-            await addMessage(body);
+            if (!accessToken || !ticketId) return;
+
+            const res = await fetch(`${API_BASE}/tickets/${ticketId}/messages`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${accessToken}`,
+              },
+              body: JSON.stringify({ sender_type: "customer", body }),
+              cache: "no-store",
+            });
+
+            if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+
+            await loadTicketData(accessToken, ticketId);
           } catch (e: any) {
             alert(e.message || "Message failed");
           }
@@ -965,43 +639,8 @@ export default function TicketPage() {
         <ul style={{ paddingLeft: 18 }}>
           {messages.map((m) => (
             <li key={m.id} style={{ marginBottom: 10 }}>
-              <div>
-                <b>{m.sender_type}</b>: {m.body}
-              </div>
+              <div><b>{m.sender_type}</b>: {m.body}</div>
               <div style={{ fontSize: 12, opacity: 0.7 }}>{m.created_at}</div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <h2 style={{ fontSize: 18, marginTop: 22 }}>Activity</h2>
-
-      {audit.length === 0 ? (
-        <p>No activity yet.</p>
-      ) : (
-        <ul style={{ paddingLeft: 18 }}>
-          {audit.map((a) => (
-            <li key={a.id} style={{ marginBottom: 12 }}>
-              <div>
-                <b>{a.action}</b> — {a.actor}
-              </div>
-
-              {a.meta_json && (
-                <pre
-                  style={{
-                    marginTop: 6,
-                    padding: 10,
-                    borderRadius: 8,
-                    background: "rgba(255,255,255,0.06)",
-                    overflowX: "auto",
-                    fontSize: 12,
-                  }}
-                >
-                  {a.meta_json}
-                </pre>
-              )}
-
-              <div style={{ fontSize: 12, opacity: 0.7 }}>{a.created_at}</div>
             </li>
           ))}
         </ul>

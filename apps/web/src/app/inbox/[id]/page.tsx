@@ -22,6 +22,12 @@ type Ticket = {
   ai_summary: string | null;
   ai_last_error: string | null;
   ai_updated_at: string | null;
+
+  draft_reply: string | null;
+  draft_status: string;
+  draft_kb_refs: string | null;
+  draft_last_error: string | null;
+  draft_updated_at: string | null;
 };
 
 type Message = {
@@ -46,6 +52,12 @@ type ParsedEntities = {
   order_id: string | null;
   keywords: string[];
   needs_human_review: boolean;
+};
+
+type KbRef = {
+  id: number;
+  title: string;
+  category: string;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
@@ -99,6 +111,23 @@ function parseEntities(raw: string | null): ParsedEntities | null {
   }
 }
 
+function parseKbRefs(raw: string | null): KbRef[] {
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.map((item) => ({
+      id: Number(item.id),
+      title: String(item.title || ""),
+      category: String(item.category || "other"),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function aiStatusStyle(status: string): React.CSSProperties {
   const base: React.CSSProperties = {
     display: "inline-flex",
@@ -129,6 +158,46 @@ function aiStatusStyle(status: string): React.CSSProperties {
   }
 
   if (status === "failed") {
+    return {
+      ...base,
+      borderColor: "rgba(239,68,68,0.45)",
+      background: "rgba(239,68,68,0.14)",
+    };
+  }
+
+  return base;
+}
+
+function draftStatusStyle(status: string): React.CSSProperties {
+  const base: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.06)",
+    fontSize: 12,
+    fontWeight: 800,
+    color: "white",
+  };
+
+  if (status === "generated" || status === "edited") {
+    return {
+      ...base,
+      borderColor: "rgba(59,130,246,0.45)",
+      background: "rgba(59,130,246,0.14)",
+    };
+  }
+
+  if (status === "approved") {
+    return {
+      ...base,
+      borderColor: "rgba(34,197,94,0.42)",
+      background: "rgba(34,197,94,0.12)",
+    };
+  }
+
+  if (status === "rejected") {
     return {
       ...base,
       borderColor: "rgba(239,68,68,0.45)",
@@ -191,13 +260,31 @@ function smallPillStyle(): React.CSSProperties {
   };
 }
 
-function aiCardStyle(): React.CSSProperties {
+function cardStyle(): React.CSSProperties {
   return {
     marginTop: 18,
     padding: 16,
     border: "1px solid rgba(255,255,255,0.12)",
     borderRadius: 14,
     background: "rgba(255,255,255,0.035)",
+  };
+}
+
+function buttonStyle(primary = false, danger = false): React.CSSProperties {
+  return {
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: danger
+      ? "1px solid rgba(239,68,68,0.35)"
+      : "1px solid rgba(255,255,255,0.16)",
+    background: danger
+      ? "rgba(239,68,68,0.12)"
+      : primary
+      ? "rgba(59,130,246,0.18)"
+      : "rgba(255,255,255,0.06)",
+    color: "white",
+    cursor: "pointer",
+    fontWeight: 800,
   };
 }
 
@@ -216,9 +303,13 @@ export default function TicketPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [runningAnalysis, setRunningAnalysis] = useState(false);
+  const [generatingDraft, setGeneratingDraft] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [draftText, setDraftText] = useState("");
 
   const assignees = useMemo(() => getAssignees(), []);
   const entities = useMemo(() => parseEntities(ticket?.ai_entities ?? null), [ticket?.ai_entities]);
+  const kbRefs = useMemo(() => parseKbRefs(ticket?.draft_kb_refs ?? null), [ticket?.draft_kb_refs]);
 
   useEffect(() => {
     (async () => {
@@ -234,6 +325,10 @@ export default function TicketPage() {
       }
     })();
   }, [router]);
+
+  useEffect(() => {
+    setDraftText(ticket?.draft_reply ?? "");
+  }, [ticket?.draft_reply]);
 
   async function loadTicketData(token: string, id: string) {
     const headers = { Authorization: `Bearer ${token}` };
@@ -336,6 +431,70 @@ export default function TicketPage() {
     }
   }
 
+  async function generateDraft() {
+    if (!accessToken || !ticketId) return;
+
+    try {
+      setGeneratingDraft(true);
+
+      const res = await fetch(`${API_BASE}/tickets/${ticketId}/draft`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status} ${text}`);
+      }
+
+      await loadTicketData(accessToken, ticketId);
+    } catch (e: any) {
+      alert(e.message || "Draft generation failed");
+    } finally {
+      setGeneratingDraft(false);
+    }
+  }
+
+  async function updateDraft(status: "edited" | "approved" | "rejected") {
+    if (!accessToken || !ticketId) return;
+
+    const body =
+      status === "rejected"
+        ? { draft_status: "rejected" }
+        : { draft_status: status, draft_reply: draftText.trim() };
+
+    if (status !== "rejected" && !draftText.trim()) {
+      alert("Draft cannot be empty.");
+      return;
+    }
+
+    try {
+      setSavingDraft(true);
+
+      const res = await fetch(`${API_BASE}/tickets/${ticketId}/draft`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status} ${text}`);
+      }
+
+      await loadTicketData(accessToken, ticketId);
+    } catch (e: any) {
+      alert(e.message || "Draft update failed");
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
   async function assignTicket(assignee: string) {
     await apiPatch({ assignee });
   }
@@ -406,7 +565,10 @@ export default function TicketPage() {
 
   return (
     <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 980 }}>
-      <a href="/inbox">← Back to Inbox</a>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        <a href="/inbox">← Back to Inbox</a>
+        <a href="/knowledge">Knowledge Base</a>
+      </div>
 
       <h1 style={{ fontSize: 26, marginTop: 10 }}>{ticket.subject}</h1>
 
@@ -493,7 +655,7 @@ export default function TicketPage() {
         </div>
       </section>
 
-      <section style={aiCardStyle()}>
+      <section style={cardStyle()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h2 style={{ fontSize: 18, margin: 0 }}>AI Analysis</h2>
@@ -506,8 +668,7 @@ export default function TicketPage() {
             onClick={runAnalysis}
             disabled={runningAnalysis}
             style={{
-              padding: "8px 12px",
-              fontWeight: 800,
+              ...buttonStyle(true),
               cursor: runningAnalysis ? "not-allowed" : "pointer",
               opacity: runningAnalysis ? 0.65 : 1,
             }}
@@ -659,6 +820,129 @@ export default function TicketPage() {
             >
               {ticket.ai_last_error ?? "-"}
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section style={cardStyle()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ fontSize: 18, margin: 0 }}>Grounded Draft</h2>
+            <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
+              Drafts are generated from ticket context and active knowledge base articles. Human approval is required.
+            </div>
+          </div>
+
+          <button
+            onClick={generateDraft}
+            disabled={generatingDraft}
+            style={{
+              ...buttonStyle(true),
+              cursor: generatingDraft ? "not-allowed" : "pointer",
+              opacity: generatingDraft ? 0.65 : 1,
+            }}
+          >
+            {generatingDraft ? "Generating..." : "Generate Draft"}
+          </button>
+        </div>
+
+        <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <b>Status:</b>
+            <span style={draftStatusStyle(ticket.draft_status || "not_generated")}>
+              {ticket.draft_status || "not_generated"}
+            </span>
+
+            {ticket.draft_updated_at && (
+              <span style={{ fontSize: 12, opacity: 0.75 }}>Updated: {ticket.draft_updated_at}</span>
+            )}
+          </div>
+
+          {kbRefs.length > 0 && (
+            <div>
+              <div style={{ fontSize: 12, opacity: 0.72 }}>Grounded by KB Articles</div>
+              <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {kbRefs.map((ref) => (
+                  <span key={`${ref.id}-${ref.title}`} style={smallPillStyle()}>
+                    KB #{ref.id}: {ref.title}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {ticket.draft_last_error && (
+            <div
+              style={{
+                padding: 10,
+                borderRadius: 10,
+                background: "rgba(239,68,68,0.10)",
+                border: "1px solid rgba(239,68,68,0.28)",
+                fontSize: 13,
+              }}
+            >
+              <b>Draft Error:</b> {ticket.draft_last_error}
+            </div>
+          )}
+
+          <div>
+            <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 6 }}>Draft Reply</div>
+            <textarea
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+              placeholder="Generate a grounded draft, then edit before approval..."
+              rows={9}
+              style={{
+                width: "100%",
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(255,255,255,0.045)",
+                color: "white",
+                outline: "none",
+                resize: "vertical",
+                boxSizing: "border-box",
+                lineHeight: 1.5,
+              }}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={() => updateDraft("edited")}
+              disabled={savingDraft || !draftText.trim()}
+              style={{
+                ...buttonStyle(false),
+                opacity: savingDraft || !draftText.trim() ? 0.55 : 1,
+                cursor: savingDraft || !draftText.trim() ? "not-allowed" : "pointer",
+              }}
+            >
+              Save Edits
+            </button>
+
+            <button
+              onClick={() => updateDraft("approved")}
+              disabled={savingDraft || !draftText.trim()}
+              style={{
+                ...buttonStyle(true),
+                opacity: savingDraft || !draftText.trim() ? 0.55 : 1,
+                cursor: savingDraft || !draftText.trim() ? "not-allowed" : "pointer",
+              }}
+            >
+              Approve Draft
+            </button>
+
+            <button
+              onClick={() => updateDraft("rejected")}
+              disabled={savingDraft || ticket.draft_status === "not_generated"}
+              style={{
+                ...buttonStyle(false, true),
+                opacity: savingDraft || ticket.draft_status === "not_generated" ? 0.55 : 1,
+                cursor: savingDraft || ticket.draft_status === "not_generated" ? "not-allowed" : "pointer",
+              }}
+            >
+              Reject Draft
+            </button>
           </div>
         </div>
       </section>

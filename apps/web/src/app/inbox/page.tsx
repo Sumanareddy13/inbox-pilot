@@ -548,9 +548,6 @@ export default function InboxPage() {
             <button onClick={() => setCreateOpen(true)} style={topBtn(true)}>
               New Ticket
             </button>
-            <button onClick={() => fetchTickets()} style={topBtn(false)}>
-              Refresh
-            </button>
             <button onClick={logout} style={topBtn(false)}>
               Logout
             </button>

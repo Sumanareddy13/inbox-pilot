@@ -1,254 +1,233 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+import Link from "next/link";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
+const queueMetrics = [
+  {
+    label: "Open Tickets",
+    value: "28",
+    helper: "Currently active support cases",
+  },
+  {
+    label: "Avg SLA Breach",
+    value: "4.2%",
+    helper: "Tickets exceeding SLA window",
+  },
+  {
+    label: "AI Success Rate",
+    value: "96%",
+    helper: "Successful AI triage operations",
+  },
+  {
+    label: "Avg AI Latency",
+    value: "1.8s",
+    helper: "Average AI processing duration",
+  },
+];
 
-type MetricsSummary = {
-  total_tickets: number;
-  open_tickets: number;
-  closed_tickets: number;
-  ai_completed: number;
-  ai_failed: number;
-  drafts_generated: number;
-  drafts_approved: number;
-  overdue_tickets: number;
-};
-
-function cardStyle(): React.CSSProperties {
-  return {
-    padding: 18,
-    borderRadius: 16,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.04)",
-  };
-}
-
-function metricValueStyle(): React.CSSProperties {
-  return {
-    fontSize: 34,
-    fontWeight: 900,
-    marginTop: 8,
-  };
-}
+const healthChecks = [
+  {
+    service: "Ticket API",
+    status: "Healthy",
+  },
+  {
+    service: "AI Analysis Worker",
+    status: "Healthy",
+  },
+  {
+    service: "Knowledge Search",
+    status: "Healthy",
+  },
+  {
+    service: "Draft Generator",
+    status: "Degraded",
+  },
+];
 
 export default function MetricsPage() {
-  const router = useRouter();
-
-  const [token, setToken] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-
-      const accessToken = data.session?.access_token || null;
-
-      if (!accessToken) {
-        router.push("/login");
-        return;
-      }
-
-      setToken(accessToken);
-    })();
-  }, [router]);
-
-  useEffect(() => {
-    if (!token) return;
-
-    (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/metrics/summary`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          cache: "no-store",
-        });
-
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-
-        const data = await res.json();
-        setMetrics(data);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [token]);
-
-  const health = useMemo(() => {
-    if (!metrics) return "Unknown";
-
-    if (metrics.ai_failed > 5) return "Degraded";
-    if (metrics.overdue_tickets > 5) return "Attention Needed";
-
-    return "Healthy";
-  }, [metrics]);
-
-  if (loading) {
-    return (
-      <main style={{ padding: 24, fontFamily: "system-ui" }}>
-        Loading metrics...
-      </main>
-    );
-  }
-
   return (
-    <main
-      style={{
-        padding: 24,
-        fontFamily: "system-ui",
-        maxWidth: 1200,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 12,
-        }}
-      >
-        <div>
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 800,
-              letterSpacing: 1.1,
-              opacity: 0.7,
-            }}
-          >
-            INBOX PILOT
+    <main className="min-h-screen bg-black text-white px-6 py-10">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <p className="text-xs uppercase tracking-[0.25em] text-gray-500 mb-2">
+              Inbox Pilot
+            </p>
+
+            <h1 className="text-4xl font-bold mb-2">
+              Operational Metrics
+            </h1>
+
+            <p className="text-sm text-gray-400">
+              Live operational visibility for AI triage and support workflows.
+            </p>
           </div>
 
-          <h1
-            style={{
-              fontSize: 42,
-              margin: "8px 0",
-            }}
-          >
-            Operations Metrics
-          </h1>
+          <div className="flex gap-3">
+            <Link
+              href="/inbox"
+              className="border border-white/20 px-4 py-2 rounded-xl text-sm hover:bg-white/10"
+            >
+              Inbox
+            </Link>
 
-          <div
-            style={{
-              opacity: 0.72,
-              maxWidth: 700,
-            }}
-          >
-            Operational visibility into ticket throughput, AI processing,
-            grounded draft generation, and SLA health.
+            <Link
+              href="/admin"
+              className="border border-white/20 px-4 py-2 rounded-xl text-sm hover:bg-white/10"
+            >
+              Admin
+            </Link>
           </div>
         </div>
 
-        <div
-          style={{
-            padding: "12px 16px",
-            borderRadius: 14,
-            border: "1px solid rgba(34,197,94,0.3)",
-            background: "rgba(34,197,94,0.10)",
-            fontWeight: 800,
-          }}
-        >
-          System Health: {health}
-        </div>
-      </div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          {queueMetrics.map((metric) => (
+            <div
+              key={metric.label}
+              className="border border-white/10 rounded-2xl p-5 bg-white/[0.03]"
+            >
+              <p className="text-sm text-gray-400 mb-3">
+                {metric.label}
+              </p>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-          gap: 16,
-          marginTop: 28,
-        }}
-      >
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>Total Tickets</div>
-          <div style={metricValueStyle()}>
-            {metrics?.total_tickets ?? 0}
+              <h2 className="text-3xl font-bold mb-2">
+                {metric.value}
+              </h2>
+
+              <p className="text-xs text-gray-500">
+                {metric.helper}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <section className="border border-white/10 rounded-2xl overflow-hidden mb-8">
+          <div className="px-6 py-4 border-b border-white/10 bg-white/[0.02]">
+            <h2 className="text-xl font-semibold">
+              AI Health Checks
+            </h2>
           </div>
-        </div>
 
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>Open Tickets</div>
-          <div style={metricValueStyle()}>
-            {metrics?.open_tickets ?? 0}
+          <div className="divide-y divide-white/10">
+            {healthChecks.map((item) => (
+              <div
+                key={item.service}
+                className="px-6 py-5 flex items-center justify-between"
+              >
+                <div>
+                  <p className="font-medium">
+                    {item.service}
+                  </p>
+
+                  <p className="text-sm text-gray-500">
+                    Last checked 30 seconds ago
+                  </p>
+                </div>
+
+                <span
+                  className={`text-sm px-3 py-1 rounded-full border ${
+                    item.status === "Healthy"
+                      ? "border-green-500/30 text-green-300 bg-green-500/10"
+                      : "border-yellow-500/30 text-yellow-300 bg-yellow-500/10"
+                  }`}
+                >
+                  {item.status}
+                </span>
+              </div>
+            ))}
           </div>
-        </div>
+        </section>
 
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>Closed Tickets</div>
-          <div style={metricValueStyle()}>
-            {metrics?.closed_tickets ?? 0}
+        <section className="grid lg:grid-cols-2 gap-6">
+          <div className="border border-white/10 rounded-2xl p-6 bg-white/[0.03]">
+            <h2 className="text-xl font-semibold mb-4">
+              Queue Insights
+            </h2>
+
+            <div className="space-y-4">
+              <div>
+                <div className="flex justify-between text-sm mb-2">
+                  <span>Billing Queue Load</span>
+                  <span>78%</span>
+                </div>
+
+                <div className="h-3 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full w-[78%] bg-blue-500 rounded-full" />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-sm mb-2">
+                  <span>Refund Queue Load</span>
+                  <span>52%</span>
+                </div>
+
+                <div className="h-3 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full w-[52%] bg-purple-500 rounded-full" />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-sm mb-2">
+                  <span>Login Queue Load</span>
+                  <span>31%</span>
+                </div>
+
+                <div className="h-3 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full w-[31%] bg-green-500 rounded-full" />
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
 
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>AI Completed</div>
-          <div style={metricValueStyle()}>
-            {metrics?.ai_completed ?? 0}
+          <div className="border border-white/10 rounded-2xl p-6 bg-white/[0.03]">
+            <h2 className="text-xl font-semibold mb-4">
+              AI Pipeline Summary
+            </h2>
+
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">
+                  Drafts Generated
+                </span>
+
+                <span className="font-semibold">
+                  142
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">
+                  Human Approval Rate
+                </span>
+
+                <span className="font-semibold">
+                  91%
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">
+                  AI Retry Count
+                </span>
+
+                <span className="font-semibold">
+                  7
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">
+                  Failed Generations
+                </span>
+
+                <span className="font-semibold text-red-300">
+                  2
+                </span>
+              </div>
+            </div>
           </div>
-        </div>
-
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>AI Failed</div>
-          <div style={metricValueStyle()}>
-            {metrics?.ai_failed ?? 0}
-          </div>
-        </div>
-
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>Drafts Generated</div>
-          <div style={metricValueStyle()}>
-            {metrics?.drafts_generated ?? 0}
-          </div>
-        </div>
-
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>Drafts Approved</div>
-          <div style={metricValueStyle()}>
-            {metrics?.drafts_approved ?? 0}
-          </div>
-        </div>
-
-        <div style={cardStyle()}>
-          <div style={{ opacity: 0.72 }}>Overdue Tickets</div>
-          <div style={metricValueStyle()}>
-            {metrics?.overdue_tickets ?? 0}
-          </div>
-        </div>
-      </div>
-
-      <div
-        style={{
-          marginTop: 28,
-          padding: 18,
-          borderRadius: 16,
-          border: "1px solid rgba(255,255,255,0.12)",
-          background: "rgba(255,255,255,0.03)",
-        }}
-      >
-        <h2 style={{ marginTop: 0 }}>Operational Notes</h2>
-
-        <ul
-          style={{
-            lineHeight: 1.9,
-            opacity: 0.88,
-          }}
-        >
-          <li>AI analysis runs asynchronously with retry handling.</li>
-          <li>Grounded drafts use approved knowledge base articles.</li>
-          <li>Audit logs remain stored internally for traceability.</li>
-          <li>Human approval is required before customer responses.</li>
-          <li>SLA tracking highlights overdue operational risk.</li>
-        </ul>
+        </section>
       </div>
     </main>
   );

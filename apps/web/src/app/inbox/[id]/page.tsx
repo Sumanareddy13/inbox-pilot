@@ -211,9 +211,7 @@ export default function TicketPage() {
       setAccessToken(token);
       setSessionChecked(true);
 
-      if (!token) {
-        router.push("/login");
-      }
+      if (!token) router.push("/login");
     })();
   }, [router]);
 
@@ -361,9 +359,17 @@ export default function TicketPage() {
     }
   }
 
-  if (!sessionChecked) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
-  if (!accessToken) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
-  if (loading) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading ticket…</main>;
+  if (!sessionChecked) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
+  }
+
+  if (!accessToken) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
+  }
+
+  if (loading) {
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading ticket…</main>;
+  }
 
   if (err) {
     return (
@@ -384,267 +390,269 @@ export default function TicketPage() {
   }
 
   return (
-    <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 980 }}>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-        <a href="/inbox">← Back to Inbox</a>
-        <a href="/knowledge">Knowledge Base</a>
-        <a href="/metrics">Metrics</a>
-      </div>
-
-      <h1 style={{ fontSize: 26, marginTop: 10 }}>{ticket.subject}</h1>
-
-      <div style={{ marginTop: 8, opacity: 0.85 }}>
-        <div><b>Ticket:</b> #{ticket.id}</div>
-        <div>
-          <b>Status:</b> {ticket.status} • <b>Priority:</b> {ticket.priority} • <b>Category:</b> {ticket.category}
-        </div>
-        <div><b>Assignee:</b> {ticket.assignee ?? "-"}</div>
-        <div><b>SLA:</b> {formatSla(ticket.due_at)} {ticket.due_at ? `(${ticket.due_at})` : ""}</div>
-      </div>
-
-      <section style={cardStyle()}>
-        <h2 style={{ fontSize: 16, marginBottom: 10 }}>Actions</h2>
-
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <label htmlFor="assignee"><b>Assign:</b></label>
-
-          <select
-            id="assignee"
-            value={ticket.assignee ?? ""}
-            style={{ padding: 8 }}
-            onChange={async (e) => {
-              try {
-                await apiPatch({ assignee: e.target.value });
-              } catch (e: any) {
-                alert(e.message || "Assign failed");
-              }
-            }}
-          >
-            <option value="">Unassigned</option>
-            {assignees.map((name) => (
-              <option key={name} value={name}>{name}</option>
-            ))}
-          </select>
-
-          <button
-            onClick={() => apiPatch({ status: "closed" })}
-            disabled={ticket.status === "closed"}
-            style={buttonStyle()}
-          >
-            {ticket.status === "closed" ? "Already Closed" : "Close Ticket"}
-          </button>
+    <main style={{ padding: "32px 24px", fontFamily: "system-ui" }}>
+      <div style={{ maxWidth: 980, margin: "0 auto" }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+          <a href="/inbox">← Back to Inbox</a>
+          <a href="/knowledge">Knowledge Base</a>
+          <a href="/metrics">Metrics</a>
         </div>
 
-        <div style={{ marginTop: 12 }}>
-          <b>Set SLA:</b>{" "}
-          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString() })}>+4h</button>{" "}
-          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() })}>+24h</button>{" "}
-          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString() })}>+72h</button>{" "}
-          <button style={buttonStyle()} onClick={() => apiPatch({ due_at: "" })}>Clear</button>
-        </div>
-      </section>
+        <h1 style={{ fontSize: 26, marginTop: 10 }}>{ticket.subject}</h1>
 
-      <section style={cardStyle()}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ marginTop: 8, opacity: 0.85 }}>
+          <div><b>Ticket:</b> #{ticket.id}</div>
           <div>
-            <h2 style={{ fontSize: 18, margin: 0 }}>AI Analysis</h2>
-            <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
-              AI classifies urgency, extracts entities, and flags risky tickets for human review.
-            </div>
+            <b>Status:</b> {ticket.status} • <b>Priority:</b> {ticket.priority} • <b>Category:</b> {ticket.category}
           </div>
-
-          <button onClick={runAnalysis} disabled={runningAnalysis} style={buttonStyle(true)}>
-            {runningAnalysis ? "Analysis Running..." : "Run AI Analysis"}
-          </button>
+          <div><b>Assignee:</b> {ticket.assignee ?? "-"}</div>
+          <div><b>SLA:</b> {formatSla(ticket.due_at)} {ticket.due_at ? `(${ticket.due_at})` : ""}</div>
         </div>
 
-        <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <b>Status:</b>
-            <span style={statusPill(ticket.ai_status || "pending")}>{ticket.ai_status || "pending"}</span>
+        <section style={cardStyle()}>
+          <h2 style={{ fontSize: 16, marginBottom: 10 }}>Actions</h2>
 
-            {entities?.needs_human_review && (
-              <span style={pillStyle("amber")}>Needs Human Review</span>
-            )}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <label htmlFor="assignee"><b>Assign:</b></label>
+
+            <select
+              id="assignee"
+              value={ticket.assignee ?? ""}
+              style={{ padding: 8 }}
+              onChange={async (e) => {
+                try {
+                  await apiPatch({ assignee: e.target.value });
+                } catch (e: any) {
+                  alert(e.message || "Assign failed");
+                }
+              }}
+            >
+              <option value="">Unassigned</option>
+              {assignees.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+
+            <button
+              onClick={() => apiPatch({ status: "closed" })}
+              disabled={ticket.status === "closed"}
+              style={buttonStyle()}
+            >
+              {ticket.status === "closed" ? "Already Closed" : "Close Ticket"}
+            </button>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+          <div style={{ marginTop: 12 }}>
+            <b>Set SLA:</b>{" "}
+            <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString() })}>+4h</button>{" "}
+            <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() })}>+24h</button>{" "}
+            <button style={buttonStyle()} onClick={() => apiPatch({ due_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString() })}>+72h</button>{" "}
+            <button style={buttonStyle()} onClick={() => apiPatch({ due_at: "" })}>Clear</button>
+          </div>
+        </section>
+
+        <section style={cardStyle()}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <div>
-              <div style={{ fontSize: 12, opacity: 0.72 }}>Suggested Category</div>
-              <div style={{ marginTop: 5, fontWeight: 800 }}>{ticket.ai_category ?? "-"}</div>
+              <h2 style={{ fontSize: 18, margin: 0 }}>AI Analysis</h2>
+              <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
+                AI classifies urgency, extracts entities, and flags risky tickets for human review.
+              </div>
             </div>
 
-            <div>
-              <div style={{ fontSize: 12, opacity: 0.72 }}>Suggested Priority</div>
-              <div style={{ marginTop: 5, fontWeight: 800 }}>{ticket.ai_priority ?? "-"}</div>
+            <button onClick={runAnalysis} disabled={runningAnalysis} style={buttonStyle(true)}>
+              {runningAnalysis ? "Analysis Running..." : "Run AI Analysis"}
+            </button>
+          </div>
+
+          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <b>Status:</b>
+              <span style={statusPill(ticket.ai_status || "pending")}>{ticket.ai_status || "pending"}</span>
+
+              {entities?.needs_human_review && (
+                <span style={pillStyle("amber")}>Needs Human Review</span>
+              )}
             </div>
 
-            <div>
-              <div style={{ fontSize: 12, opacity: 0.72 }}>Confidence</div>
-              <div style={{ marginTop: 5 }}>
-                <span style={confidenceStyle(ticket.ai_confidence)}>{prettyConfidence(ticket.ai_confidence)}</span>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>Suggested Category</div>
+                <div style={{ marginTop: 5, fontWeight: 800 }}>{ticket.ai_category ?? "-"}</div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>Suggested Priority</div>
+                <div style={{ marginTop: 5, fontWeight: 800 }}>{ticket.ai_priority ?? "-"}</div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>Confidence</div>
+                <div style={{ marginTop: 5 }}>
+                  <span style={confidenceStyle(ticket.ai_confidence)}>{prettyConfidence(ticket.ai_confidence)}</span>
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>Last Updated</div>
+                <div style={{ marginTop: 5, fontWeight: 700 }}>{ticket.ai_updated_at ?? "-"}</div>
               </div>
             </div>
 
             <div>
-              <div style={{ fontSize: 12, opacity: 0.72 }}>Last Updated</div>
-              <div style={{ marginTop: 5, fontWeight: 700 }}>{ticket.ai_updated_at ?? "-"}</div>
+              <div style={{ fontSize: 12, opacity: 0.72 }}>Summary</div>
+              <div style={{ marginTop: 6, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.045)" }}>
+                {ticket.ai_summary ?? "-"}
+              </div>
             </div>
+
+            <div>
+              <div style={{ fontSize: 12, opacity: 0.72 }}>Extracted Entities</div>
+
+              {!entities ? (
+                <div style={{ marginTop: 6, opacity: 0.8 }}>No entities available.</div>
+              ) : (
+                <div style={{ marginTop: 8, display: "grid", gap: 10, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.045)" }}>
+                  <div><b>Email:</b> {entities.customer_email ?? "-"}</div>
+                  <div><b>Order ID:</b> {entities.order_id ?? "-"}</div>
+                  <div>
+                    <b>Keywords:</b>{" "}
+                    {entities.keywords.length === 0 ? "-" : (
+                      <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", marginLeft: 6 }}>
+                        {entities.keywords.map((keyword) => (
+                          <span key={keyword} style={smallPillStyle()}>{keyword}</span>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {ticket.ai_last_error && (
+              <div style={{ padding: 10, borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.28)", fontSize: 13 }}>
+                <b>AI Error:</b> {ticket.ai_last_error}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section style={cardStyle()}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ fontSize: 18, margin: 0 }}>Grounded Draft</h2>
+              <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
+                Drafts use ticket context and approved knowledge articles. Agents approve before sending.
+              </div>
+            </div>
+
+            <button onClick={generateDraft} disabled={generatingDraft} style={buttonStyle(true)}>
+              {generatingDraft ? "Generating..." : "Generate Draft"}
+            </button>
           </div>
 
-          <div>
-            <div style={{ fontSize: 12, opacity: 0.72 }}>Summary</div>
-            <div style={{ marginTop: 6, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.045)" }}>
-              {ticket.ai_summary ?? "-"}
+          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <b>Status:</b>
+              <span style={statusPill(ticket.draft_status || "not_generated")}>
+                {ticket.draft_status || "not_generated"}
+              </span>
+              {ticket.draft_updated_at && <span style={{ fontSize: 12, opacity: 0.75 }}>Updated: {ticket.draft_updated_at}</span>}
             </div>
-          </div>
 
-          <div>
-            <div style={{ fontSize: 12, opacity: 0.72 }}>Extracted Entities</div>
-
-            {!entities ? (
-              <div style={{ marginTop: 6, opacity: 0.8 }}>No entities available.</div>
-            ) : (
-              <div style={{ marginTop: 8, display: "grid", gap: 10, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.045)" }}>
-                <div><b>Email:</b> {entities.customer_email ?? "-"}</div>
-                <div><b>Order ID:</b> {entities.order_id ?? "-"}</div>
-                <div>
-                  <b>Keywords:</b>{" "}
-                  {entities.keywords.length === 0 ? "-" : (
-                    <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", marginLeft: 6 }}>
-                      {entities.keywords.map((keyword) => (
-                        <span key={keyword} style={smallPillStyle()}>{keyword}</span>
-                      ))}
+            {kbRefs.length > 0 && (
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>Grounded by KB Articles</div>
+                <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {kbRefs.map((ref) => (
+                    <span key={`${ref.id}-${ref.title}`} style={smallPillStyle()}>
+                      KB #{ref.id}: {ref.title}
                     </span>
-                  )}
+                  ))}
                 </div>
               </div>
             )}
-          </div>
 
-          {ticket.ai_last_error && (
-            <div style={{ padding: 10, borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.28)", fontSize: 13 }}>
-              <b>AI Error:</b> {ticket.ai_last_error}
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section style={cardStyle()}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-          <div>
-            <h2 style={{ fontSize: 18, margin: 0 }}>Grounded Draft</h2>
-            <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
-              Drafts use ticket context and approved knowledge articles. Agents approve before sending.
-            </div>
-          </div>
-
-          <button onClick={generateDraft} disabled={generatingDraft} style={buttonStyle(true)}>
-            {generatingDraft ? "Generating..." : "Generate Draft"}
-          </button>
-        </div>
-
-        <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <b>Status:</b>
-            <span style={statusPill(ticket.draft_status || "not_generated")}>
-              {ticket.draft_status || "not_generated"}
-            </span>
-            {ticket.draft_updated_at && <span style={{ fontSize: 12, opacity: 0.75 }}>Updated: {ticket.draft_updated_at}</span>}
-          </div>
-
-          {kbRefs.length > 0 && (
-            <div>
-              <div style={{ fontSize: 12, opacity: 0.72 }}>Grounded by KB Articles</div>
-              <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {kbRefs.map((ref) => (
-                  <span key={`${ref.id}-${ref.title}`} style={smallPillStyle()}>
-                    KB #{ref.id}: {ref.title}
-                  </span>
-                ))}
+            {ticket.draft_last_error && (
+              <div style={{ padding: 10, borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.28)", fontSize: 13 }}>
+                <b>Draft Error:</b> {ticket.draft_last_error}
               </div>
+            )}
+
+            <textarea
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+              placeholder="Generate a grounded draft, then edit before approval..."
+              rows={9}
+              style={{
+                width: "100%",
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(255,255,255,0.045)",
+                color: "white",
+                outline: "none",
+                resize: "vertical",
+                boxSizing: "border-box",
+                lineHeight: 1.5,
+              }}
+            />
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button onClick={() => updateDraft("edited")} disabled={savingDraft || !draftText.trim()} style={buttonStyle()}>
+                Save Edits
+              </button>
+
+              <button onClick={() => updateDraft("approved")} disabled={savingDraft || !draftText.trim()} style={buttonStyle(true)}>
+                Approve Draft
+              </button>
+
+              <button onClick={() => updateDraft("rejected")} disabled={savingDraft || ticket.draft_status === "not_generated"} style={buttonStyle(false, true)}>
+                Reject Draft
+              </button>
             </div>
-          )}
-
-          {ticket.draft_last_error && (
-            <div style={{ padding: 10, borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.28)", fontSize: 13 }}>
-              <b>Draft Error:</b> {ticket.draft_last_error}
-            </div>
-          )}
-
-          <textarea
-            value={draftText}
-            onChange={(e) => setDraftText(e.target.value)}
-            placeholder="Generate a grounded draft, then edit before approval..."
-            rows={9}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: "rgba(255,255,255,0.045)",
-              color: "white",
-              outline: "none",
-              resize: "vertical",
-              boxSizing: "border-box",
-              lineHeight: 1.5,
-            }}
-          />
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => updateDraft("edited")} disabled={savingDraft || !draftText.trim()} style={buttonStyle()}>
-              Save Edits
-            </button>
-
-            <button onClick={() => updateDraft("approved")} disabled={savingDraft || !draftText.trim()} style={buttonStyle(true)}>
-              Approve Draft
-            </button>
-
-            <button onClick={() => updateDraft("rejected")} disabled={savingDraft || ticket.draft_status === "not_generated"} style={buttonStyle(false, true)}>
-              Reject Draft
-            </button>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <h2 style={{ fontSize: 18, marginTop: 22 }}>Messages</h2>
+        <h2 style={{ fontSize: 18, marginTop: 22 }}>Messages</h2>
 
-      <MessageComposer
-        onSend={async (body) => {
-          try {
-            if (!accessToken || !ticketId) return;
+        <MessageComposer
+          onSend={async (body) => {
+            try {
+              if (!accessToken || !ticketId) return;
 
-            const res = await fetch(`${API_BASE}/tickets/${ticketId}/messages`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${accessToken}`,
-              },
-              body: JSON.stringify({ sender_type: "customer", body }),
-              cache: "no-store",
-            });
+              const res = await fetch(`${API_BASE}/tickets/${ticketId}/messages`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({ sender_type: "customer", body }),
+                cache: "no-store",
+              });
 
-            if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+              if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 
-            await loadTicketData(accessToken, ticketId);
-          } catch (e: any) {
-            alert(e.message || "Message failed");
-          }
-        }}
-      />
+              await loadTicketData(accessToken, ticketId);
+            } catch (e: any) {
+              alert(e.message || "Message failed");
+            }
+          }}
+        />
 
-      {messages.length === 0 ? (
-        <p>No messages yet.</p>
-      ) : (
-        <ul style={{ paddingLeft: 18 }}>
-          {messages.map((m) => (
-            <li key={m.id} style={{ marginBottom: 10 }}>
-              <div><b>{m.sender_type}</b>: {m.body}</div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>{m.created_at}</div>
-            </li>
-          ))}
-        </ul>
-      )}
+        {messages.length === 0 ? (
+          <p>No messages yet.</p>
+        ) : (
+          <ul style={{ paddingLeft: 18 }}>
+            {messages.map((m) => (
+              <li key={m.id} style={{ marginBottom: 10 }}>
+                <div><b>{m.sender_type}</b>: {m.body}</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>{m.created_at}</div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </main>
   );
 }

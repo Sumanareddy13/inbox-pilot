@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -35,7 +35,10 @@ function formatDateShort(iso: string) {
   });
 }
 
-function getSlaState(dueAt: string | null, status: string): "none" | "safe" | "warning" | "overdue" {
+function getSlaState(
+  dueAt: string | null,
+  status: string,
+): "none" | "safe" | "warning" | "overdue" {
   if (!dueAt || status === "closed") return "none";
 
   const due = new Date(dueAt).getTime();
@@ -61,7 +64,11 @@ function formatSla(dueAt: string | null, status: string) {
   const days = Math.floor(hrs / 24);
 
   const pretty =
-    days > 0 ? `${days}d ${hrs % 24}h` : hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
+    days > 0
+      ? `${days}d ${hrs % 24}h`
+      : hrs > 0
+        ? `${hrs}h ${mins % 60}m`
+        : `${mins}m`;
 
   if (diffMs < 0) return `Overdue ${pretty}`;
   return `Due ${pretty}`;
@@ -78,7 +85,10 @@ function urgencyRank(ticket: Ticket) {
   return 4;
 }
 
-function pillStyle(kind: "status" | "priority" | "category" | "sla", value: string) {
+function pillStyle(
+  kind: "status" | "priority" | "category" | "sla",
+  value: string,
+) {
   const base = {
     display: "inline-flex",
     alignItems: "center",
@@ -165,15 +175,19 @@ function pillStyle(kind: "status" | "priority" | "category" | "sla", value: stri
   return base;
 }
 
-function statCard(title: string, value: number, accent: "neutral" | "green" | "red" | "amber") {
+function statCard(
+  title: string,
+  value: number,
+  accent: "neutral" | "green" | "red" | "amber",
+) {
   const accentBorder =
     accent === "green"
       ? "rgba(34,197,94,0.32)"
       : accent === "red"
-      ? "rgba(239,68,68,0.32)"
-      : accent === "amber"
-      ? "rgba(245,158,11,0.32)"
-      : "rgba(255,255,255,0.12)";
+        ? "rgba(239,68,68,0.32)"
+        : accent === "amber"
+          ? "rgba(245,158,11,0.32)"
+          : "rgba(255,255,255,0.12)";
 
   return (
     <div
@@ -191,7 +205,7 @@ function statCard(title: string, value: number, accent: "neutral" | "green" | "r
   );
 }
 
-export default function InboxPage() {
+function InboxPageContent() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -212,12 +226,17 @@ export default function InboxPage() {
   const [newCategory, setNewCategory] = useState("other");
 
   const [updatingRowId, setUpdatingRowId] = useState<number | null>(null);
-  const [rowActionMessage, setRowActionMessage] = useState<Record<number, string>>({});
+  const [rowActionMessage, setRowActionMessage] = useState<
+    Record<number, string>
+  >({});
 
   const assignees = useMemo(() => getAssignees(), []);
   const searchInitRef = useRef(false);
 
-  const limit = Math.min(Math.max(parseInt(sp.get("limit") || "20", 10), 1), 200);
+  const limit = Math.min(
+    Math.max(parseInt(sp.get("limit") || "20", 10), 1),
+    200,
+  );
   const offset = Math.max(parseInt(sp.get("offset") || "0", 10), 0);
   const sortBy = sp.get("sort_by") || "created_at";
   const order = sp.get("order") || "desc";
@@ -350,7 +369,11 @@ export default function InboxPage() {
     }
   }
 
-  async function runRowAction(ticketId: number, message: string, action: () => Promise<void>) {
+  async function runRowAction(
+    ticketId: number,
+    message: string,
+    action: () => Promise<void>,
+  ) {
     try {
       setUpdatingRowId(ticketId);
       setRowActionMessage((prev) => ({ ...prev, [ticketId]: message }));
@@ -377,7 +400,8 @@ export default function InboxPage() {
 
   async function toggleTicketStatus(ticket: Ticket) {
     const nextStatus = ticket.status === "closed" ? "open" : "closed";
-    const actionText = nextStatus === "closed" ? "Closing ticket..." : "Reopening ticket...";
+    const actionText =
+      nextStatus === "closed" ? "Closing ticket..." : "Reopening ticket...";
 
     await runRowAction(ticket.id, actionText, async () => {
       await updateTicket(ticket.id, { status: nextStatus });
@@ -461,7 +485,9 @@ export default function InboxPage() {
     const open = tickets.filter((t) => t.status === "open").length;
     const closed = tickets.filter((t) => t.status === "closed").length;
     const high = tickets.filter((t) => t.priority === "high").length;
-    const overdue = tickets.filter((t) => getSlaState(t.due_at, t.status) === "overdue").length;
+    const overdue = tickets.filter(
+      (t) => getSlaState(t.due_at, t.status) === "overdue",
+    ).length;
 
     return { totalCount, open, closed, overdue, high };
   }, [tickets]);
@@ -478,49 +504,115 @@ export default function InboxPage() {
   }, [tickets]);
 
   const from = total === 0 ? 0 : Math.min(offset + 1, total);
-  const to = total === 0 ? 0 : Math.min(offset + displayedTickets.length, total);
+  const to =
+    total === 0 ? 0 : Math.min(offset + displayedTickets.length, total);
   const canPrev = offset > 0;
   const canNext = offset + tickets.length < total;
 
   const filterButtons = [
     {
       label: "All",
-      isActive: !activeStatus && !activePriority && !activeCategory && !activeOverdue,
-      qs: { status: null, priority: null, category: null, overdue: null, offset: "0" },
+      isActive:
+        !activeStatus && !activePriority && !activeCategory && !activeOverdue,
+      qs: {
+        status: null,
+        priority: null,
+        category: null,
+        overdue: null,
+        offset: "0",
+      },
     },
     {
       label: "Open",
-      isActive: activeStatus === "open" && !activePriority && !activeCategory && !activeOverdue,
-      qs: { status: "open", priority: null, category: null, overdue: null, offset: "0" },
+      isActive:
+        activeStatus === "open" &&
+        !activePriority &&
+        !activeCategory &&
+        !activeOverdue,
+      qs: {
+        status: "open",
+        priority: null,
+        category: null,
+        overdue: null,
+        offset: "0",
+      },
     },
     {
       label: "High Priority",
-      isActive: activePriority === "high" && !activeStatus && !activeCategory && !activeOverdue,
-      qs: { priority: "high", status: null, category: null, overdue: null, offset: "0" },
+      isActive:
+        activePriority === "high" &&
+        !activeStatus &&
+        !activeCategory &&
+        !activeOverdue,
+      qs: {
+        priority: "high",
+        status: null,
+        category: null,
+        overdue: null,
+        offset: "0",
+      },
     },
     {
       label: "Billing",
-      isActive: activeCategory === "billing" && !activeStatus && !activePriority && !activeOverdue,
-      qs: { category: "billing", status: null, priority: null, overdue: null, offset: "0" },
+      isActive:
+        activeCategory === "billing" &&
+        !activeStatus &&
+        !activePriority &&
+        !activeOverdue,
+      qs: {
+        category: "billing",
+        status: null,
+        priority: null,
+        overdue: null,
+        offset: "0",
+      },
     },
     {
       label: "Login",
-      isActive: activeCategory === "login" && !activeStatus && !activePriority && !activeOverdue,
-      qs: { category: "login", status: null, priority: null, overdue: null, offset: "0" },
+      isActive:
+        activeCategory === "login" &&
+        !activeStatus &&
+        !activePriority &&
+        !activeOverdue,
+      qs: {
+        category: "login",
+        status: null,
+        priority: null,
+        overdue: null,
+        offset: "0",
+      },
     },
     {
       label: "Overdue",
-      isActive: activeOverdue === "true" && !activeStatus && !activePriority && !activeCategory,
-      qs: { overdue: "true", status: null, priority: null, category: null, offset: "0" },
+      isActive:
+        activeOverdue === "true" &&
+        !activeStatus &&
+        !activePriority &&
+        !activeCategory,
+      qs: {
+        overdue: "true",
+        status: null,
+        priority: null,
+        category: null,
+        offset: "0",
+      },
     },
   ];
 
   if (!sessionChecked) {
-    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Checking session…</main>;
+    return (
+      <main style={{ padding: 24, fontFamily: "system-ui" }}>
+        Checking session…
+      </main>
+    );
   }
 
   if (!accessToken) {
-    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Redirecting to login…</main>;
+    return (
+      <main style={{ padding: 24, fontFamily: "system-ui" }}>
+        Redirecting to login…
+      </main>
+    );
   }
 
   return (
@@ -537,11 +629,24 @@ export default function InboxPage() {
       }}
     >
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 14,
+          }}
+        >
           <div>
-            <div style={{ fontSize: 12, letterSpacing: 1, opacity: 0.85 }}>INBOX PILOT</div>
-            <h1 style={{ fontSize: 36, margin: "6px 0 6px", fontWeight: 900 }}>Inbox</h1>
-            <div style={{ opacity: 0.8, fontSize: 13 }}>Support triage dashboard (current view)</div>
+            <div style={{ fontSize: 12, letterSpacing: 1, opacity: 0.85 }}>
+              INBOX PILOT
+            </div>
+            <h1 style={{ fontSize: 36, margin: "6px 0 6px", fontWeight: 900 }}>
+              Inbox
+            </h1>
+            <div style={{ opacity: 0.8, fontSize: 13 }}>
+              Support triage dashboard (current view)
+            </div>
           </div>
 
           <div style={{ display: "flex", gap: 10 }}>
@@ -579,7 +684,11 @@ export default function InboxPage() {
             }}
           />
           <div style={{ fontSize: 12, opacity: 0.72 }}>
-            {searchInput.trim() !== q ? "Typing..." : q ? `Searching: "${q}"` : "Search is live"}
+            {searchInput.trim() !== q
+              ? "Typing..."
+              : q
+                ? `Searching: "${q}"`
+                : "Search is live"}
           </div>
           <button
             onClick={() => {
@@ -592,15 +701,23 @@ export default function InboxPage() {
           </button>
         </div>
 
-        <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
+        <div
+          style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}
+        >
           {filterButtons.map((b) => (
-            <button key={b.label} onClick={() => setQS(b.qs)} style={filterBtn(b.isActive)}>
+            <button
+              key={b.label}
+              onClick={() => setQS(b.qs)}
+              style={filterBtn(b.isActive)}
+            >
               {b.label}
             </button>
           ))}
         </div>
 
-        <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+        <div
+          style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}
+        >
           {statCard("Total (page)", stats.totalCount, "neutral")}
           {statCard("Open (page)", stats.open, "green")}
           {statCard("Closed (page)", stats.closed, "neutral")}
@@ -628,7 +745,14 @@ export default function InboxPage() {
             )}
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ fontSize: 12, opacity: 0.85 }}>Page size</span>
               <select
@@ -646,7 +770,9 @@ export default function InboxPage() {
               <span style={{ fontSize: 12, opacity: 0.85 }}>Sort</span>
               <select
                 value={sortBy}
-                onChange={(e) => setQS({ sort_by: e.target.value, offset: "0" })}
+                onChange={(e) =>
+                  setQS({ sort_by: e.target.value, offset: "0" })
+                }
                 style={selectStyle()}
               >
                 <option value="created_at">Created</option>
@@ -656,7 +782,12 @@ export default function InboxPage() {
               </select>
 
               <button
-                onClick={() => setQS({ order: order === "asc" ? "desc" : "asc", offset: "0" })}
+                onClick={() =>
+                  setQS({
+                    order: order === "asc" ? "desc" : "asc",
+                    offset: "0",
+                  })
+                }
                 style={actionBtn()}
               >
                 {order === "asc" ? "↑ ASC" : "↓ DESC"}
@@ -666,7 +797,9 @@ export default function InboxPage() {
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 disabled={!canPrev || loading}
-                onClick={() => setQS({ offset: String(Math.max(offset - limit, 0)) })}
+                onClick={() =>
+                  setQS({ offset: String(Math.max(offset - limit, 0)) })
+                }
                 style={pageBtn(!canPrev || loading)}
               >
                 Prev
@@ -691,10 +824,16 @@ export default function InboxPage() {
             overflow: "hidden",
           }}
         >
-          <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+          <div
+            style={{
+              padding: "12px 14px",
+              borderBottom: "1px solid rgba(255,255,255,0.08)",
+            }}
+          >
             <div style={{ fontWeight: 900 }}>Tickets</div>
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-              Tip: urgent tickets float to the top, and SLA can be adjusted directly from the inbox.
+              Tip: urgent tickets float to the top, and SLA can be adjusted
+              directly from the inbox.
             </div>
           </div>
 
@@ -711,11 +850,19 @@ export default function InboxPage() {
             </div>
           ) : displayedTickets.length === 0 ? (
             <div style={{ padding: 16, opacity: 0.85 }}>
-              {q ? `No tickets matched "${q}".` : "No tickets match these filters."}
+              {q
+                ? `No tickets matched "${q}".`
+                : "No tickets match these filters."}
             </div>
           ) : (
             <div style={{ width: "100%", overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: 13,
+                }}
+              >
                 <thead>
                   <tr style={{ textAlign: "left", opacity: 0.8 }}>
                     <th style={{ padding: "10px 14px" }}>Ticket</th>
@@ -747,14 +894,21 @@ export default function InboxPage() {
                           background: isOverdue
                             ? "rgba(239,68,68,0.08)"
                             : isUnassignedOpen
-                            ? "rgba(245,158,11,0.08)"
-                            : isWarning
-                            ? "rgba(245,158,11,0.05)"
-                            : "transparent",
+                              ? "rgba(245,158,11,0.08)"
+                              : isWarning
+                                ? "rgba(245,158,11,0.05)"
+                                : "transparent",
                         }}
                       >
                         <td style={{ padding: "12px 14px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                              flexWrap: "wrap",
+                            }}
+                          >
                             <a
                               href={`/inbox/${t.id}`}
                               style={{
@@ -767,25 +921,55 @@ export default function InboxPage() {
                               #{t.id} — {t.subject}
                             </a>
 
-                            {isOverdue && <span style={flagStyle("danger")}>Overdue</span>}
-                            {isUnassignedOpen && <span style={flagStyle("warning")}>Unassigned</span>}
-                            {isWarning && !isOverdue && <span style={flagStyle("warning")}>Due Soon</span>}
+                            {isOverdue && (
+                              <span style={flagStyle("danger")}>Overdue</span>
+                            )}
+                            {isUnassignedOpen && (
+                              <span style={flagStyle("warning")}>
+                                Unassigned
+                              </span>
+                            )}
+                            {isWarning && !isOverdue && (
+                              <span style={flagStyle("warning")}>Due Soon</span>
+                            )}
                           </div>
 
-                          <div style={{ fontSize: 12, opacity: 0.72, marginTop: 4 }}>
-                            {t.assignee ? `Assigned to ${t.assignee}` : "Unassigned"}
+                          <div
+                            style={{
+                              fontSize: 12,
+                              opacity: 0.72,
+                              marginTop: 4,
+                            }}
+                          >
+                            {t.assignee
+                              ? `Assigned to ${t.assignee}`
+                              : "Unassigned"}
                           </div>
 
                           {isRowUpdating && rowMessage && (
-                            <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                opacity: 0.7,
+                                marginTop: 6,
+                              }}
+                            >
                               {rowMessage}
                             </div>
                           )}
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
-                            <span style={pillStyle("status", t.status)}>{t.status}</span>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: 8,
+                              justifyItems: "start",
+                            }}
+                          >
+                            <span style={pillStyle("status", t.status)}>
+                              {t.status}
+                            </span>
                             <button
                               disabled={isRowUpdating}
                               onClick={() => {
@@ -800,18 +984,22 @@ export default function InboxPage() {
                               {isRowUpdating
                                 ? "Updating..."
                                 : t.status === "closed"
-                                ? "Reopen"
-                                : "Close"}
+                                  ? "Reopen"
+                                  : "Close"}
                             </button>
                           </div>
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <span style={pillStyle("priority", t.priority)}>{t.priority}</span>
+                          <span style={pillStyle("priority", t.priority)}>
+                            {t.priority}
+                          </span>
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <span style={pillStyle("category", t.category)}>{t.category}</span>
+                          <span style={pillStyle("category", t.category)}>
+                            {t.category}
+                          </span>
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
@@ -840,11 +1028,25 @@ export default function InboxPage() {
                         </td>
 
                         <td style={{ padding: "12px 14px" }}>
-                          <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
-                            <span style={pillStyle("sla", slaText)}>{slaText}</span>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: 8,
+                              justifyItems: "start",
+                            }}
+                          >
+                            <span style={pillStyle("sla", slaText)}>
+                              {slaText}
+                            </span>
 
                             {t.status === "open" && (
-                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 6,
+                                  flexWrap: "wrap",
+                                }}
+                              >
                                 <button
                                   disabled={isRowUpdating}
                                   onClick={() => {
@@ -868,7 +1070,9 @@ export default function InboxPage() {
                                   onClick={() => {
                                     void clearTicketSla(t.id);
                                   }}
-                                  style={miniGhostBtn(isRowUpdating || !t.due_at)}
+                                  style={miniGhostBtn(
+                                    isRowUpdating || !t.due_at,
+                                  )}
                                 >
                                   Clear
                                 </button>
@@ -893,14 +1097,26 @@ export default function InboxPage() {
       {createOpen && (
         <div style={overlayStyle}>
           <div style={modalStyle}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+              }}
+            >
               <div>
-                <div style={{ fontSize: 22, fontWeight: 900 }}>Create Ticket</div>
+                <div style={{ fontSize: 22, fontWeight: 900 }}>
+                  Create Ticket
+                </div>
                 <div style={{ fontSize: 13, opacity: 0.76, marginTop: 4 }}>
                   Add a new support ticket to the inbox
                 </div>
               </div>
-              <button onClick={() => setCreateOpen(false)} style={closeBtnStyle}>
+              <button
+                onClick={() => setCreateOpen(false)}
+                style={closeBtnStyle}
+              >
                 ✕
               </button>
             </div>
@@ -916,10 +1132,20 @@ export default function InboxPage() {
                 />
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 12,
+                }}
+              >
                 <div>
                   <div style={labelStyle}>Priority</div>
-                  <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} style={selectStyle()}>
+                  <select
+                    value={newPriority}
+                    onChange={(e) => setNewPriority(e.target.value)}
+                    style={selectStyle()}
+                  >
                     <option value="low">low</option>
                     <option value="medium">medium</option>
                     <option value="high">high</option>
@@ -928,7 +1154,11 @@ export default function InboxPage() {
 
                 <div>
                   <div style={labelStyle}>Category</div>
-                  <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} style={selectStyle()}>
+                  <select
+                    value={newCategory}
+                    onChange={(e) => setNewCategory(e.target.value)}
+                    style={selectStyle()}
+                  >
                     <option value="billing">billing</option>
                     <option value="login">login</option>
                     <option value="refund">refund</option>
@@ -938,11 +1168,22 @@ export default function InboxPage() {
               </div>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: 10,
+                marginTop: 20,
+              }}
+            >
               <button onClick={() => setCreateOpen(false)} style={actionBtn()}>
                 Cancel
               </button>
-              <button onClick={createTicket} disabled={creating} style={topBtn(true)}>
+              <button
+                onClick={createTicket}
+                disabled={creating}
+                style={topBtn(true)}
+              >
                 {creating ? "Creating..." : "Create Ticket"}
               </button>
             </div>
@@ -1041,7 +1282,9 @@ function filterBtn(active: boolean): React.CSSProperties {
   return {
     padding: "7px 12px",
     borderRadius: 999,
-    border: active ? "1px solid rgba(59,130,246,0.55)" : "1px solid rgba(255,255,255,0.16)",
+    border: active
+      ? "1px solid rgba(59,130,246,0.55)"
+      : "1px solid rgba(255,255,255,0.16)",
     background: active ? "rgba(59,130,246,0.20)" : "rgba(255,255,255,0.06)",
     color: "white",
     cursor: "pointer",
@@ -1095,7 +1338,8 @@ const modalStyle: React.CSSProperties = {
   maxWidth: 560,
   borderRadius: 18,
   border: "1px solid rgba(255,255,255,0.12)",
-  background: "linear-gradient(180deg, rgba(17,24,39,0.98), rgba(10,15,28,0.98))",
+  background:
+    "linear-gradient(180deg, rgba(17,24,39,0.98), rgba(10,15,28,0.98))",
   color: "white",
   padding: 20,
   boxShadow: "0 20px 80px rgba(0,0,0,0.45)",
@@ -1129,3 +1373,11 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 6,
   fontWeight: 700,
 };
+
+export default function InboxPage() {
+  return (
+    <Suspense fallback={<main style={{ padding: 24 }}>Loading inbox...</main>}>
+      <InboxPageContent />
+    </Suspense>
+  );
+}
